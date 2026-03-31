@@ -27,6 +27,7 @@ except Exception:
     st_autorefresh = None
 
 from bosses import BOSSES
+from exhibition_sources import OFFICIAL_EXHIBITION_CENTER_SOURCES
 from events import TODAY_EVENTS
 from mock_advisor import (
     ACTION_TEMPLATES,
@@ -324,6 +325,34 @@ WECHAT_EXHIBITION_CENTER_SOURCES = [
 ]
 
 WECHAT_EVENT_EXTRA_MARKERS = ["会展", "展览", "博览会", "博览", "发布会", "推介会", "招商会"]
+
+EXHIBITION_CENTER_FETCH_BATCH_SIZE = 16
+EXHIBITION_CENTER_PER_SITE_LIMIT = 2
+EXHIBITION_CENTER_TITLE_MARKERS = [
+    "展会",
+    "展览",
+    "博览",
+    "博览会",
+    "会展",
+    "交易会",
+    "博览城",
+    "峰会",
+    "论坛",
+    "大会",
+    "展讯",
+    "排期",
+]
+EXHIBITION_CENTER_TITLE_EXCLUDE_MARKERS = [
+    "首页",
+    "联系我们",
+    "关于我们",
+    "版权",
+    "隐私",
+    "登录",
+    "注册",
+    "下载",
+    "导航",
+]
 
 EVENT_API_QUERIES = [
     "business summit",
@@ -1842,6 +1871,172 @@ def _interleave_event_sources(source_buckets: list[list[dict]], max_items: int) 
     return merged
 
 
+def _looks_like_exhibition_event_title(title: str) -> bool:
+    text = _clean_html_text(title)
+    if not text or len(text) < 6:
+        return False
+
+    if any(marker in text for marker in EXHIBITION_CENTER_TITLE_EXCLUDE_MARKERS):
+        return False
+
+    if any(marker in text for marker in EXHIBITION_CENTER_TITLE_MARKERS):
+        return True
+
+    return bool(re.search(r"\d{1,2}[月\-/.]\d{1,2}", text) and ("展" in text or "会" in text))
+
+
+def _extract_exhibition_event_time(title: str, context_text: str = "") -> str:
+    text = f"{title} {context_text}"
+
+    ymd_match = re.search(r"(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})", text)
+    if ymd_match:
+        try:
+            dt = datetime(int(ymd_match.group(1)), int(ymd_match.group(2)), int(ymd_match.group(3)))
+            return dt.strftime("%m-%d")
+        except Exception:
+            pass
+
+    md_match = re.search(r"(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*(?:日|号)?", text)
+    if md_match:
+        month = int(md_match.group(1))
+        day = int(md_match.group(2))
+        try:
+            now = datetime.now()
+            dt = datetime(now.year, month, day)
+            if dt.date() < now.date():
+                dt = datetime(now.year + 1, month, day)
+            return dt.strftime("%m-%d")
+        except Exception:
+            pass
+
+    return "待确认（官网排期）"
+
+
+def _extract_official_exhibition_events(
+    html_text: str,
+    source: dict[str, str],
+    max_items: int = 2,
+) -> list[dict]:
+    if not html_text:
+        return []
+
+    city = str(source.get("city", "")).strip() or "本地"
+    center_name = str(source.get("center", "会展中心")).strip() or "会展中心"
+    base_url = str(source.get("schedule_url") or source.get("site") or "").strip()
+
+    anchor_pattern = re.compile(r'<a[^>]+href=["\'](?P<href>[^"\']+)["\'][^>]*>(?P<title>.*?)</a>', flags=re.I | re.S)
+    collected: list[dict] = []
+    seen_titles = set()
+
+    for match in anchor_pattern.finditer(html_text):
+        title = _clean_html_text(match.group("title") or "")
+        if not _looks_like_exhibition_event_title(title):
+            continue
+
+        title_key = re.sub(r"\s+", " ", title.lower()).strip()
+        if title_key in seen_titles:
+            continue
+
+        href = _normalize_url_with_base(match.group("href") or "", base_url)
+        if not href:
+            continue
+
+        context_raw = html_text[max(0, match.start() - 240): min(len(html_text), match.end() + 320)]
+        context_text = _clean_html_text(context_raw)
+        event_time = _extract_exhibition_event_time(title, context_text)
+
+        raw_text = f"{title} {context_text}".lower()
+        event_format = "线上" if any(w in raw_text for w in ["线上", "直播", "webinar", "在线"]) else "线下"
+        location = "线上" if event_format == "线上" else f"{city} · {center_name}"
+        description = f"来源：{city}{center_name}官网展会排期，建议点击官方链接确认展位与报名信息。"
+
+        keywords, industries = _detect_event_profile(title, description)
+        high_value = any(marker in f"{title} {context_text}" for marker in EVENT_MARKERS) or any(
+            marker in title for marker in ["展会", "博览会", "交易会", "峰会", "论坛"]
+        )
+
+        seen_titles.add(title_key)
+        collected.append(
+            {
+                "title": _normalize_event_text(title, max_len=96),
+                "time": event_time,
+                "location": location,
+                "format": event_format,
+                "source": "local",
+                "source_detail": f"会展中心官网排期（{center_name}）",
+                "keywords": keywords,
+                "target_industries": industries,
+                "description": description,
+                "registration_deadline": "详见官网排期页",
+                "value": "高" if high_value else "中",
+                "url": href,
+            }
+        )
+
+        if len(collected) >= max_items:
+            break
+
+    return collected
+
+
+def _fetch_official_exhibition_center_events(max_items: int = 24) -> tuple[list[dict], list[str]]:
+    sources = OFFICIAL_EXHIBITION_CENTER_SOURCES
+    if not sources:
+        return [], ["会展中心官网源为空"]
+
+    batch_size = min(EXHIBITION_CENTER_FETCH_BATCH_SIZE, len(sources))
+    seed = int(datetime.now().strftime("%Y%m%d%H"))
+    start = seed % len(sources)
+    selected_sources = [sources[(start + idx) % len(sources)] for idx in range(batch_size)]
+
+    collected: list[dict] = []
+    warnings: list[str] = []
+    seen_titles = set()
+    seen_urls = set()
+
+    for source in selected_sources:
+        fetch_url = str(source.get("schedule_url") or source.get("site") or "").strip()
+        if not fetch_url:
+            continue
+
+        html_text = _safe_get_text(fetch_url, timeout=7)
+        if not html_text:
+            continue
+
+        candidates = _extract_official_exhibition_events(
+            html_text,
+            source=source,
+            max_items=EXHIBITION_CENTER_PER_SITE_LIMIT,
+        )
+        for event in candidates:
+            title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
+            event_url = str(event.get("url", "")).strip()
+
+            if title_key and title_key in seen_titles:
+                continue
+            if event_url and event_url in seen_urls:
+                continue
+            if not _is_mainland_event(event):
+                continue
+
+            if title_key:
+                seen_titles.add(title_key)
+            if event_url:
+                seen_urls.add(event_url)
+
+            collected.append(event)
+            if len(collected) >= max_items:
+                warnings.append(f"已补充会展中心官网排期活动 {len(collected)} 条")
+                return collected, warnings
+
+    if collected:
+        warnings.append(f"已补充会展中心官网排期活动 {len(collected)} 条")
+    else:
+        warnings.append("会展中心官网排期暂未返回可解析活动（可能受站点结构或反爬限制）")
+
+    return collected, warnings
+
+
 def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
     entries: list[dict] = []
     query_keywords = list(dict.fromkeys(HUODONGJIA_EVENT_KEYWORDS + ["会展", "路演", "沙龙"]))
@@ -2016,16 +2211,20 @@ def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
     huodongxing_events = _fetch_huodongxing_events(max_items=max_items * 2)
     huodongjia_events = _fetch_huodongjia_events(max_items=max_items * 2)
     wechat_exhibition_events, wechat_warnings = _fetch_wechat_exhibition_center_events(max_items=max(max_items, 8))
+    official_exhibition_events, official_warnings = _fetch_official_exhibition_center_events(max_items=max(max_items * 2, 24))
 
     mixed_events = _interleave_event_sources(
-        [huodongxing_events, huodongjia_events, wechat_exhibition_events],
+        [official_exhibition_events, huodongxing_events, huodongjia_events, wechat_exhibition_events],
         max_items=max_items * 4,
     )
     if mixed_events:
         all_events.extend(mixed_events)
 
-    if not huodongxing_events and not huodongjia_events and not wechat_exhibition_events:
-        warnings.append("本土活动源暂不可用（活动行/活动家/会展中心公众号均未返回可用活动）")
+    if not huodongxing_events and not huodongjia_events and not wechat_exhibition_events and not official_exhibition_events:
+        warnings.append("本土活动源暂不可用（活动行/活动家/会展中心官网/公众号均未返回可用活动）")
+
+    if official_warnings:
+        warnings.extend(official_warnings)
 
     if wechat_warnings:
         warnings.extend(wechat_warnings)
