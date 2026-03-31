@@ -2280,10 +2280,17 @@ def _infer_goal_domain(boss: dict) -> str:
     return "通用"
 
 
-def _generate_smart_goal(boss: dict, news_items: list[dict], events: list[dict], seed: int = 0) -> str:
+def _generate_smart_goal(
+    boss: dict,
+    news_items: list[dict],
+    events: list[dict],
+    seed: int = 0,
+    style_mode: str = "平衡（推荐）",
+) -> str:
     domain = _infer_goal_domain(boss)
     city = _canonical_city_name(boss.get("city", "")) or "本地"
     primary_keyword = (boss.get("keywords") or ["核心业务"])[0]
+    goal_preference = str(boss.get("goal_preference", "")).strip()
 
     related_news = [item for item in news_items if _news_relevance_tier(boss, item) >= 1]
     related_events = [item for item in events if _event_relevance_tier(boss, item) >= 1]
@@ -2294,64 +2301,166 @@ def _generate_smart_goal(boss: dict, news_items: list[dict], events: list[dict],
             hot_category = cat
             break
 
-    templates = {
+    goal_packs = {
         "餐饮": [
-            "围绕{city}门店增长，优先筛选餐饮连锁与供应链降本机会，本周落地1个可执行动作。",
-            "聚焦{primary_keyword}与{hot_category}信号，先做门店选址和爆品结构优化，形成可复用打法。",
+            {
+                "headline": "在{city}打出可复制的门店增长样板",
+                "action": "7天内完成3家目标门店拜访并确认1次试点合作",
+                "stretch": "14天内沉淀1个可展示案例并带来2个转介绍线索",
+            },
+            {
+                "headline": "围绕{primary_keyword}拿下{city}连锁客户首单",
+                "action": "本周完成2位决策人面谈并提交可执行报价方案",
+                "stretch": "本月将核心门店转化率提升8%-12%",
+            },
         ],
         "品牌": [
-            "围绕{city}高潜客户，优先筛选品牌升级与{hot_category}项目机会，本周完成2个高质量触达。",
-            "以{primary_keyword}为主线，先拿下1个可展示案例，再扩展科技/新消费方向的新增客户。",
+            {
+                "headline": "在{city}做出1个能被传播的品牌增长案例",
+                "action": "本周完成2次高质量客户触达并锁定1个提案机会",
+                "stretch": "14天内实现1个可公开展示的品牌合作成果",
+            },
+            {
+                "headline": "围绕{primary_keyword}切入高客单品牌客户",
+                "action": "7天内提交2版差异化方案并推进1次复盘会",
+                "stretch": "本月新增2个稳定付费客户",
+            },
         ],
         "企业培训": [
-            "围绕{city}企业客户，优先筛选培训与组织发展场景，本周推进1个可签单需求。",
-            "聚焦{primary_keyword}和{hot_category}趋势，先做2次关键决策人沟通，缩短成交周期。",
+            {
+                "headline": "在{city}拿下企业培训场景的标杆客户",
+                "action": "本周完成2次关键决策人沟通并推进1个试讲",
+                "stretch": "14天内形成1个可复制签单脚本",
+            },
+            {
+                "headline": "围绕{primary_keyword}缩短培训项目成交周期",
+                "action": "7天内锁定1个明确预算客户并提交落地排期",
+                "stretch": "本月把需求到签约周期压缩20%",
+            },
         ],
         "外贸": [
-            "围绕{city}外贸与跨境机会，优先筛选{hot_category}相关客户，本周形成1个新增询盘闭环。",
-            "聚焦{primary_keyword}主线，先优化报价与供货稳定性，再拓展东南亚新客户。",
+            {
+                "headline": "在{city}跑通一条外贸新增询盘链路",
+                "action": "本周完成2个高潜海外客户触达并推进1轮报价",
+                "stretch": "14天内形成1个可复用出海获客模板",
+            },
+            {
+                "headline": "围绕{primary_keyword}拿下跨境高价值客户",
+                "action": "7天内完善报价与交付优势并完成1次视频洽谈",
+                "stretch": "本月实现1笔新增出口订单",
+            },
         ],
         "设计": [
-            "围绕{city}产品团队，优先筛选设计升级和AI提效项目，本周拿下1个可展示合作。",
-            "以{primary_keyword}为切口，先输出可量化价值方案，再推进2个潜在客户跟进。",
+            {
+                "headline": "在{city}拿下1个设计升级标杆项目",
+                "action": "本周完成2个潜在客户方案演示并确定1次试合作",
+                "stretch": "14天内沉淀1个可展示前后对比案例",
+            },
+            {
+                "headline": "围绕{primary_keyword}做出可量化的设计价值",
+                "action": "7天内输出1版带业务指标的改版提案",
+                "stretch": "本月推动1个项目进入长期合作",
+            },
         ],
         "电商": [
-            "围绕{city}电商增长，优先筛选直播转化和选品优化机会，本周跑通1轮小规模验证。",
-            "聚焦{primary_keyword}和{hot_category}热点，先优化流量与转化链路，再扩大投放。",
+            {
+                "headline": "在{city}打通电商增长的可复制打法",
+                "action": "本周跑完1轮选品与投放小闭环并复盘关键数据",
+                "stretch": "14天内将核心商品转化率提升10%",
+            },
+            {
+                "headline": "围绕{primary_keyword}拿下高潜流量窗口",
+                "action": "7天内完成2次素材迭代并验证1条高ROI链路",
+                "stretch": "本月新增1个稳定放量品类",
+            },
         ],
         "汽配": [
-            "围绕{city}汽配出海机会，优先筛选新能源与B2B客户，本周完成1个高价值商机对接。",
-            "以{primary_keyword}为抓手，先沉淀报价与交付优势，再推进海外渠道合作。",
+            {
+                "headline": "在{city}拿下汽配出海的关键合作机会",
+                "action": "本周完成2个B2B客户深聊并推进1轮样品报价",
+                "stretch": "14天内确定1个稳定海外渠道合作意向",
+            },
+            {
+                "headline": "围绕{primary_keyword}放大交付与价格优势",
+                "action": "7天内优化报价包并完成1次关键客户提案",
+                "stretch": "本月实现1笔新增高毛利订单",
+            },
         ],
         "猎头": [
-            "围绕{city}中高端人才需求，优先筛选AI/新能源岗位机会，本周提交2位高匹配候选人。",
-            "聚焦{primary_keyword}方向，先做候选人池扩容，再推进关键客户职位独家合作。",
+            {
+                "headline": "在{city}打造中高端岗位交付样板",
+                "action": "本周提交2位高匹配候选人并推进1次面试",
+                "stretch": "14天内拿到1个独家职位合作",
+            },
+            {
+                "headline": "围绕{primary_keyword}提高候选人与职位匹配效率",
+                "action": "7天内扩容候选人池并完成2次客户需求澄清",
+                "stretch": "本月将推荐到面试转化率提升15%",
+            },
         ],
         "建材": [
-            "围绕{city}工程采购需求，优先筛选建材与市政项目机会，本周推进1个可成交项目。",
-            "以{primary_keyword}为主线，先优化账期和回款，再拓展政府工程相关合作。",
+            {
+                "headline": "在{city}拿下工程采购的高价值项目",
+                "action": "本周完成2家项目方拜访并推进1轮商务谈判",
+                "stretch": "14天内形成1个可成交项目清单",
+            },
+            {
+                "headline": "围绕{primary_keyword}提升建材项目成交确定性",
+                "action": "7天内优化账期与回款条款并提交1个正式报价",
+                "stretch": "本月新增1个长期供货合作",
+            },
         ],
         "法律科技": [
-            "围绕{city}律所与企业法务场景，优先筛选法律科技合作机会，本周完成1次产品演示。",
-            "聚焦{primary_keyword}与{hot_category}趋势，先打磨标杆案例，再推进融资与客户拓展。",
+            {
+                "headline": "在{city}打出法律科技落地标杆",
+                "action": "本周完成1次产品演示并推进1个试点场景",
+                "stretch": "14天内沉淀1个可公开案例",
+            },
+            {
+                "headline": "围绕{primary_keyword}切入高价值法务需求",
+                "action": "7天内完成2次关键客户访谈并提交落地方案",
+                "stretch": "本月拿下1个稳定续费客户",
+            },
         ],
         "通用": [
-            "围绕{city}核心客户群，优先筛选与{primary_keyword}相关的高价值机会，本周形成1个可执行闭环。",
-            "结合{hot_category}趋势，先做2次关键客户触达，再推进1个可量化的业务增长动作。",
+            {
+                "headline": "在{city}聚焦{primary_keyword}拿下关键增长突破",
+                "action": "本周完成2次高质量客户触达并推进1个明确商机",
+                "stretch": "14天内形成1个可复制增长闭环",
+            },
+            {
+                "headline": "围绕{hot_category}窗口抢占先机",
+                "action": "7天内完成1轮方案验证并拿到关键反馈",
+                "stretch": "本月沉淀1个可对外展示的增长成果",
+            },
         ],
     }
 
-    rng_seed = seed + sum(ord(ch) for ch in f"{boss.get('name', '')}-{city}-{domain}")
-    rng = random.Random(rng_seed)
-    options = templates.get(domain, templates["通用"])
-    template = rng.choice(options)
-    goal = template.format(city=city, primary_keyword=primary_keyword, hot_category=hot_category)
+    style_options = {"稳健落地", "平衡（推荐）", "高势能冲刺"}
+    normalized_style = style_mode if style_mode in style_options else "平衡（推荐）"
 
-    # 若实时数据中有强相关候选，目标更偏“立即成交”
-    if related_events and rng.random() > 0.5:
+    rng_seed = seed + sum(ord(ch) for ch in f"{boss.get('name', '')}-{city}-{domain}-{normalized_style}-{goal_preference}")
+    rng = random.Random(rng_seed)
+    pack = rng.choice(goal_packs.get(domain, goal_packs["通用"]))
+    headline = pack["headline"].format(city=city, primary_keyword=primary_keyword, hot_category=hot_category)
+    action = pack["action"].format(city=city, primary_keyword=primary_keyword, hot_category=hot_category)
+    stretch = pack["stretch"].format(city=city, primary_keyword=primary_keyword, hot_category=hot_category)
+
+    event_name = ""
+    if related_events:
         event_name = str(related_events[0].get("title", "")).strip()
-        if event_name:
-            goal = f"优先围绕「{event_name[:18]}」机会推进关键客户对接，并在本周形成可执行成交动作。"
+    if event_name and normalized_style != "稳健落地" and rng.random() > 0.45:
+        headline = f"借势「{event_name[:20]}」抢占关键窗口"
+
+    if normalized_style == "稳健落地":
+        goal = f"{headline}。落地动作：{action}。"
+    elif normalized_style == "高势能冲刺":
+        goal = f"{headline}。冲刺目标：{stretch}。立即动作：{action}。"
+    else:
+        goal = f"{headline}。落地动作：{action}；冲刺目标：{stretch}。"
+
+    if goal_preference:
+        goal += f" 优先偏好：{goal_preference}。"
 
     return goal
 
@@ -3133,6 +3242,8 @@ inject_styles()
 
 if "smart_goal_seed" not in st.session_state:
     st.session_state["smart_goal_seed"] = int(time.time())
+if "live_context_cache" not in st.session_state:
+    st.session_state["live_context_cache"] = {}
 
 with st.sidebar:
     st.markdown("## 🧭 AI商业参谋")
@@ -3150,6 +3261,17 @@ with st.sidebar:
     )
 
     goal_input_mode = st.selectbox("目标来源", ["智能推荐筛选", "手动输入"], index=0)
+    goal_style_mode = st.selectbox(
+        "目标风格",
+        ["平衡（推荐）", "稳健落地", "高势能冲刺"],
+        index=0,
+        disabled=(goal_input_mode == "手动输入"),
+    )
+    goal_preference_input = st.text_input(
+        "目标偏好（可选）",
+        value="",
+        placeholder="例如：高客单、短周期、可公开案例",
+    )
     manual_goal_input = ""
     goal_preview = st.empty()
     if goal_input_mode == "手动输入":
@@ -3158,6 +3280,7 @@ with st.sidebar:
             value="",
             placeholder="例如：拓展新能源/科技客户，建立AI时代差异化",
         )
+        st.caption("手动输入时，目标风格与偏好不参与生成。")
     else:
         st.caption("目标：可以手动输入或智能推荐筛选")
     refresh_goal = st.button("刷新智能目标", use_container_width=True)
@@ -3165,6 +3288,8 @@ with st.sidebar:
         st.session_state["smart_goal_seed"] = int(st.session_state.get("smart_goal_seed", 0)) + 1
 
     selected_boss = dict(selected_boss_base)
+    if goal_preference_input.strip() and goal_input_mode != "手动输入":
+        selected_boss["goal_preference"] = goal_preference_input.strip()
     if goal_input_mode == "手动输入" and manual_goal_input.strip():
         selected_boss["current_goal"] = manual_goal_input.strip()
 
@@ -3195,12 +3320,34 @@ if refresh:
     get_realtime_feeds.clear()
     st.toast("已手动刷新实时数据", icon="🔄")
 
-live_news, live_events, live_updated_at, live_warnings = get_realtime_feeds(refresh_bucket)
-live_warnings = list(live_warnings)
+live_cache = st.session_state.get("live_context_cache") or {}
+cached_bucket = int(live_cache.get("refresh_bucket", -1)) if isinstance(live_cache, dict) else -1
+can_reuse_live_context = bool(refresh_goal and not refresh and cached_bucket == refresh_bucket)
 
-live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(live_events, max_travel_hours=MAX_TRAVEL_HOURS)
-if geo_warnings:
-    live_warnings.extend(geo_warnings)
+if can_reuse_live_context:
+    live_news = [{**item} for item in (live_cache.get("live_news") or [])]
+    live_events = [{**item} for item in (live_cache.get("live_events") or [])]
+    live_updated_at = str(live_cache.get("live_updated_at", ""))
+    live_warnings = list(live_cache.get("live_warnings") or [])
+    user_geo_profile = dict(live_cache.get("user_geo_profile") or {"enabled": False})
+    st.toast("已快速刷新智能目标（复用当前实时数据）", icon="⚡")
+else:
+    live_news_raw, live_events_raw, live_updated_at, live_warnings_raw = get_realtime_feeds(refresh_bucket)
+    live_warnings = list(live_warnings_raw)
+
+    live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(live_events_raw, max_travel_hours=MAX_TRAVEL_HOURS)
+    if geo_warnings:
+        live_warnings.extend(geo_warnings)
+
+    live_news = [{**item} for item in live_news_raw]
+    st.session_state["live_context_cache"] = {
+        "refresh_bucket": refresh_bucket,
+        "live_news": [{**item} for item in live_news],
+        "live_events": [{**item} for item in live_events],
+        "live_updated_at": live_updated_at,
+        "live_warnings": list(live_warnings),
+        "user_geo_profile": dict(user_geo_profile),
+    }
 
 if user_geo_profile.get("enabled"):
     city = _canonical_city_name(user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "") or "未知城市"
@@ -3251,6 +3398,7 @@ smart_goal_text = _generate_smart_goal(
     industry_news_pool or all_news,
     industry_event_pool or live_events,
     seed=int(st.session_state.get("smart_goal_seed", 0)),
+    style_mode=goal_style_mode,
 )
 if goal_input_mode == "手动输入" and manual_goal_input.strip():
     selected_boss["current_goal"] = manual_goal_input.strip()
