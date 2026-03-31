@@ -149,6 +149,17 @@ WECHAT_EVENT_CHANNEL_TOPICS = [
     ("会展中心公众号", "会展中心 排期 展会 论坛"),
 ]
 
+WECHAT_EXHIBITION_CENTER_SOURCES = [
+    {"city": "北京", "center": "国家会议中心", "query": "国家会议中心 展会 排期 活动"},
+    {"city": "上海", "center": "上海新国际博览中心", "query": "上海新国际博览中心 展会 排期 活动"},
+    {"city": "广州", "center": "广交会展馆", "query": "广交会展馆 会展 排期 活动"},
+    {"city": "深圳", "center": "深圳会展中心", "query": "深圳会展中心 展会 排期 活动"},
+    {"city": "杭州", "center": "杭州国际博览中心", "query": "杭州国际博览中心 展会 排期 活动"},
+    {"city": "成都", "center": "成都世纪城新国际会展中心", "query": "成都世纪城新国际会展中心 展会 排期 活动"},
+]
+
+WECHAT_EVENT_EXTRA_MARKERS = ["会展", "展览", "博览会", "博览", "发布会", "推介会", "招商会"]
+
 EVENT_API_QUERIES = [
     "business summit",
     "entrepreneur forum",
@@ -1342,6 +1353,173 @@ def _build_wechat_search_url(topic_query: str, city_hint: str = "") -> str:
     return f"https://weixin.sogou.com/weixin?type=2&query={quote_plus(query)}"
 
 
+def _normalize_wechat_result_url(raw_url: str) -> str:
+    url = html.unescape(str(raw_url or "")).strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.startswith("/"):
+        url = urljoin("https://weixin.sogou.com", url)
+    return url
+
+
+def _looks_like_wechat_event_title(title: str) -> bool:
+    text = re.sub(r"\s+", "", str(title or "")).strip()
+    if len(text) < 8:
+        return False
+
+    marker_pool = EVENT_MARKERS + WECHAT_EVENT_EXTRA_MARKERS
+    return any(marker in text for marker in marker_pool)
+
+
+def _extract_wechat_event_time(title: str, context_text: str = "") -> str:
+    text = f"{title} {context_text}"
+
+    ymd_match = re.search(r"(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})", text)
+    if ymd_match:
+        try:
+            dt = datetime(int(ymd_match.group(1)), int(ymd_match.group(2)), int(ymd_match.group(3)))
+            return dt.strftime("%m-%d")
+        except Exception:
+            pass
+
+    md_match = re.search(r"(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*(?:日|号)?", text)
+    if md_match:
+        month = int(md_match.group(1))
+        day = int(md_match.group(2))
+        try:
+            year = datetime.now().year
+            dt = datetime(year, month, day)
+            if dt.date() < datetime.now().date():
+                dt = datetime(year + 1, month, day)
+            return dt.strftime("%m-%d")
+        except Exception:
+            pass
+
+    return "待确认（公众号）"
+
+
+def _extract_wechat_exhibition_events(
+    html_text: str,
+    city: str,
+    center_name: str,
+    max_items: int = 3,
+) -> list[dict]:
+    if not html_text:
+        return []
+
+    anchor_pattern = re.compile(r'<a[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>', flags=re.I | re.S)
+    collected: list[dict] = []
+    seen_titles = set()
+
+    for match in anchor_pattern.finditer(html_text):
+        href = _normalize_wechat_result_url(match.group("href") or "")
+        if not href:
+            continue
+        if "mp.weixin.qq.com" not in href and "weixin.sogou.com/link?" not in href:
+            continue
+
+        title = _clean_html_text(match.group("title") or "")
+        if not title or not _looks_like_wechat_event_title(title):
+            continue
+
+        title_key = re.sub(r"\s+", " ", title.lower()).strip()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
+        context_raw = html_text[max(0, match.start() - 280): min(len(html_text), match.end() + 320)]
+        context_text = _clean_html_text(context_raw)
+        event_time = _extract_wechat_event_time(title, context_text)
+
+        raw_text = f"{title} {context_text}".lower()
+        event_format = "线上" if any(w in raw_text for w in ["线上", "直播", "webinar", "在线"]) else "线下"
+        location = "线上" if event_format == "线上" else f"{city}（{center_name}公众号）"
+        description = (
+            f"来源：{city}{center_name}微信公众号线索。"
+            "建议点击原文确认场馆、日期和报名方式。"
+        )
+
+        keywords, industries = _detect_event_profile(title, description)
+        high_value = any(marker in f"{title} {context_text}" for marker in EVENT_MARKERS)
+
+        collected.append(
+            {
+                "title": title,
+                "time": event_time,
+                "location": location,
+                "format": event_format,
+                "source": "wechat",
+                "source_detail": f"微信公众号（{center_name}）",
+                "keywords": keywords,
+                "target_industries": industries,
+                "description": description,
+                "registration_deadline": "详见公众号原文",
+                "value": "高" if high_value else "中",
+                "url": href,
+            }
+        )
+
+        if len(collected) >= max_items:
+            break
+
+    return collected
+
+
+def _fetch_wechat_exhibition_center_events(max_items: int = 8) -> tuple[list[dict], list[str]]:
+    collected: list[dict] = []
+    warnings: list[str] = []
+    seen_urls = set()
+
+    for source in WECHAT_EXHIBITION_CENTER_SOURCES:
+        query_url = _build_wechat_search_url(source["query"], city_hint=source["city"])
+        html_text = _safe_get_text(query_url, timeout=9)
+        if not html_text:
+            continue
+
+        candidates = _extract_wechat_exhibition_events(
+            html_text,
+            city=source["city"],
+            center_name=source["center"],
+            max_items=3,
+        )
+        for event in candidates:
+            event_url = str(event.get("url", "")).strip()
+            if event_url and event_url in seen_urls:
+                continue
+            if event_url:
+                seen_urls.add(event_url)
+            collected.append(event)
+            if len(collected) >= max_items:
+                return collected, warnings
+
+    if not collected:
+        warnings.append("会展中心公众号线索暂未返回可解析活动（可能受平台反爬限制）")
+
+    return collected, warnings
+
+
+def _interleave_event_sources(source_buckets: list[list[dict]], max_items: int) -> list[dict]:
+    merged: list[dict] = []
+    index = 0
+
+    while len(merged) < max_items:
+        progressed = False
+        for bucket in source_buckets:
+            if index < len(bucket):
+                merged.append(bucket[index])
+                progressed = True
+                if len(merged) >= max_items:
+                    break
+
+        if not progressed:
+            break
+        index += 1
+
+    return merged
+
+
 def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
     entries: list[dict] = []
     query_keywords = list(dict.fromkeys(HUODONGJIA_EVENT_KEYWORDS + ["会展", "路演", "沙龙"]))
@@ -1515,14 +1693,22 @@ def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
 
     huodongxing_events = _fetch_huodongxing_events(max_items=max_items * 2)
     huodongjia_events = _fetch_huodongjia_events(max_items=max_items * 2)
+    wechat_exhibition_events, wechat_warnings = _fetch_wechat_exhibition_center_events(max_items=max(max_items, 8))
 
-    if huodongxing_events:
-        all_events.extend(huodongxing_events)
-    if huodongjia_events:
-        all_events.extend(huodongjia_events)
+    mixed_events = _interleave_event_sources(
+        [huodongxing_events, huodongjia_events, wechat_exhibition_events],
+        max_items=max_items * 4,
+    )
+    if mixed_events:
+        all_events.extend(mixed_events)
 
-    if not huodongxing_events and not huodongjia_events:
-        warnings.append("本土活动源暂不可用（活动行/活动家均未返回可用活动）")
+    if not huodongxing_events and not huodongjia_events and not wechat_exhibition_events:
+        warnings.append("本土活动源暂不可用（活动行/活动家/会展中心公众号均未返回可用活动）")
+
+    if wechat_warnings:
+        warnings.extend(wechat_warnings)
+    elif wechat_exhibition_events:
+        warnings.append(f"已补充会展中心公众号线索 {len(wechat_exhibition_events)} 条")
 
     eventbrite_token = os.getenv("EVENTBRITE_API_TOKEN", "").strip()
     ticketmaster_key = os.getenv("TICKETMASTER_API_KEY", "").strip()
