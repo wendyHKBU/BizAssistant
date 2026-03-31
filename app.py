@@ -5554,6 +5554,9 @@ if retry_load:
 live_cache = st.session_state.get("live_context_cache") or {}
 cached_bucket = int(live_cache.get("refresh_bucket", -1)) if isinstance(live_cache, dict) else -1
 cached_pref_city = _canonical_city_name(str(live_cache.get("preferred_fetch_city", ""))) if isinstance(live_cache, dict) else ""
+stable_context_key = preferred_fetch_city or "__auto__"
+stable_context_map_ref = dict(st.session_state.get("stable_live_context_by_city") or {})
+has_stable_context = bool(stable_context_map_ref.get(stable_context_key))
 can_reuse_live_context = bool(
     refresh_goal and not refresh and not retry_load and cached_bucket == refresh_bucket and cached_pref_city == preferred_fetch_city
 )
@@ -5577,10 +5580,13 @@ if can_reuse_live_context:
     )
     st.toast("已快速刷新智能目标（复用当前实时数据）", icon="⚡")
 else:
+    attempt_budget = LIVE_FETCH_MAX_ATTEMPTS if (refresh or retry_load or (not has_stable_context)) else 1
     live_news_raw, live_events_raw, live_updated_at, live_warnings_raw, fetch_meta = _load_realtime_feeds_with_retry(
         refresh_bucket,
         preferred_city=preferred_fetch_city,
+        max_attempts=attempt_budget,
     )
+    fetch_meta["quick_fallback_mode"] = bool(attempt_budget == 1 and has_stable_context and not (refresh or retry_load))
     live_warnings = list(live_warnings_raw)
 
     live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(
@@ -5593,9 +5599,11 @@ else:
 
     live_news = [{**item} for item in live_news_raw]
 
-    stable_context_key = preferred_fetch_city or "__auto__"
-    stable_context_map = dict(st.session_state.get("stable_live_context_by_city") or {})
+    stable_context_map = dict(stable_context_map_ref)
     current_degraded = bool(fetch_meta.get("degraded"))
+
+    if current_degraded and bool(fetch_meta.get("quick_fallback_mode")):
+        live_warnings.append("已启用快速降级模式（可点击“网络波动重试”执行完整重试）")
 
     if current_degraded and stable_context_key in stable_context_map:
         stable_ref = dict(stable_context_map.get(stable_context_key) or {})
