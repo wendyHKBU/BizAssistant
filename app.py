@@ -542,6 +542,20 @@ CITY_12306_STATION_CODES = {
 MAX_TRAVEL_HOURS = 2.0
 EXTENDED_EVENT_TRAVEL_BUFFER_HOURS = 1.0
 TIME_VALUE_PER_HOUR_RMB = 220
+LIVE_FETCH_MAX_ATTEMPTS = 3
+LIVE_FETCH_RETRY_BACKOFF_SECONDS = [0.0, 0.8, 1.6]
+LIVE_FETCH_MONITOR_WINDOW = 20
+LIVE_FETCH_SLO_SUCCESS_RATE = 95.0
+LIVE_FETCH_SLO_TARGET_P50_SECONDS = 1.0
+LIVE_FETCH_SLO_TARGET_P95_SECONDS = 1.3
+LIVE_FETCH_SLO_TARGET_P99_SECONDS = 2.0
+LIVE_FETCH_DEGRADED_MARKERS = [
+    "暂不可用",
+    "回退到内置",
+    "未返回可解析",
+    "加载异常",
+    "失败",
+]
 
 
 def _google_rss_url(query: str) -> str:
@@ -2684,6 +2698,107 @@ def get_realtime_feeds(refresh_bucket: int, preferred_city: str = "") -> tuple[l
 
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return live_news, live_events, updated_at, warnings
+
+
+def _is_realtime_degraded(warnings: list[str], live_news: list[dict], live_events: list[dict]) -> bool:
+    if not live_news or not live_events:
+        return True
+
+    text = "；".join(str(item) for item in warnings if item)
+    return any(marker in text for marker in LIVE_FETCH_DEGRADED_MARKERS)
+
+
+def _load_realtime_feeds_with_retry(
+    refresh_bucket: int,
+    preferred_city: str,
+    max_attempts: int = LIVE_FETCH_MAX_ATTEMPTS,
+) -> tuple[list[dict], list[dict], str, list[str], dict]:
+    city = _canonical_city_name(preferred_city)
+    attempts = max(1, min(int(max_attempts or 1), LIVE_FETCH_MAX_ATTEMPTS))
+
+    request_id = f"REQ-{datetime.now().strftime('%m%d%H%M%S')}-{random.randint(100, 999)}"
+    attempt_logs: list[dict] = []
+    merged_warnings: list[str] = []
+
+    final_news: list[dict] = []
+    final_events: list[dict] = []
+    final_updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    final_degraded = True
+
+    begin = time.time()
+
+    for attempt in range(1, attempts + 1):
+        if attempt > 1:
+            delay = LIVE_FETCH_RETRY_BACKOFF_SECONDS[min(attempt - 1, len(LIVE_FETCH_RETRY_BACKOFF_SECONDS) - 1)]
+            st.toast(f"网络波动，正在重试（第{attempt - 1}次）", icon="🔁")
+            if delay > 0:
+                time.sleep(delay)
+            get_realtime_feeds.clear()
+        else:
+            delay = 0.0
+
+        attempt_bucket = refresh_bucket if attempt == 1 else refresh_bucket + attempt * 1_000_000
+        t0 = time.time()
+        step_warnings: list[str] = []
+
+        try:
+            live_news, live_events, updated_at, step_warnings = get_realtime_feeds(
+                attempt_bucket,
+                preferred_city=city,
+            )
+        except Exception as exc:
+            live_news, live_events = [], []
+            updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            step_warnings = [f"实时数据加载异常：{exc.__class__.__name__}"]
+
+        elapsed = round(time.time() - t0, 4)
+        degraded = _is_realtime_degraded(step_warnings, live_news, live_events)
+
+        attempt_logs.append(
+            {
+                "attempt": attempt,
+                "elapsed": elapsed,
+                "degraded": degraded,
+                "warning_count": len(step_warnings),
+                "retry_delay": delay,
+            }
+        )
+
+        merged_warnings.extend(step_warnings)
+
+        final_news = [{**item} for item in live_news]
+        final_events = [{**item} for item in live_events]
+        final_updated_at = str(updated_at)
+        final_degraded = degraded
+
+        if not degraded:
+            break
+
+    merged_warnings = list(dict.fromkeys(str(item) for item in merged_warnings if str(item).strip()))
+    total_elapsed = round(time.time() - begin, 4)
+
+    if len(attempt_logs) > 1:
+        merged_warnings.append(f"已自动重试 {len(attempt_logs) - 1} 次")
+
+    meta = {
+        "request_id": request_id,
+        "attempts": len(attempt_logs),
+        "elapsed": total_elapsed,
+        "degraded": final_degraded,
+        "attempt_logs": attempt_logs,
+        "used_stable_fallback": False,
+    }
+
+    return final_news, final_events, final_updated_at, merged_warnings, meta
+
+
+def _percentile(values: list[float], ratio: float) -> float:
+    if not values:
+        return 0.0
+
+    xs = sorted(float(v) for v in values)
+    idx = min(len(xs) - 1, max(0, int(round(float(ratio) * (len(xs) - 1)))))
+    return float(xs[idx])
 
 
 def block_html(template: str) -> str:
@@ -5350,6 +5465,10 @@ if "last_auto_goal" not in st.session_state:
     st.session_state["last_auto_goal"] = ""
 if "recommendation_cache" not in st.session_state:
     st.session_state["recommendation_cache"] = {}
+if "stable_live_context_by_city" not in st.session_state:
+    st.session_state["stable_live_context_by_city"] = {}
+if "fetch_observations" not in st.session_state:
+    st.session_state["fetch_observations"] = []
 
 with st.sidebar:
     st.markdown("## 🧭 AI商业参谋")
@@ -5412,6 +5531,7 @@ with st.sidebar:
         st_autorefresh(interval=refresh_minutes * 60 * 1000, key="auto_refresh")
 
     refresh = st.button("刷新机会雷达", use_container_width=True)
+    retry_load = st.button("网络波动重试", use_container_width=True)
 
     mode_caption = st.empty()
     count_caption = st.empty()
@@ -5419,19 +5539,23 @@ with st.sidebar:
     geo_caption = st.empty()
     scope_caption = st.empty()
     warning_caption = st.empty()
+    monitor_caption = st.empty()
 
 
 refresh_bucket = int(time.time() // (refresh_minutes * 60))
 preferred_fetch_city = _canonical_city_name(manual_city_input.strip()) or _canonical_city_name(str(selected_boss_base.get("city", "")).strip())
-if refresh:
+if refresh or retry_load:
     get_realtime_feeds.clear()
+if refresh:
     st.toast("已手动刷新实时数据", icon="🔄")
+if retry_load:
+    st.toast("已启动网络波动重试", icon="🛠️")
 
 live_cache = st.session_state.get("live_context_cache") or {}
 cached_bucket = int(live_cache.get("refresh_bucket", -1)) if isinstance(live_cache, dict) else -1
 cached_pref_city = _canonical_city_name(str(live_cache.get("preferred_fetch_city", ""))) if isinstance(live_cache, dict) else ""
 can_reuse_live_context = bool(
-    refresh_goal and not refresh and cached_bucket == refresh_bucket and cached_pref_city == preferred_fetch_city
+    refresh_goal and not refresh and not retry_load and cached_bucket == refresh_bucket and cached_pref_city == preferred_fetch_city
 )
 
 if can_reuse_live_context:
@@ -5441,9 +5565,19 @@ if can_reuse_live_context:
     live_updated_at = str(live_cache.get("live_updated_at", ""))
     live_warnings = list(live_cache.get("live_warnings") or [])
     user_geo_profile = dict(live_cache.get("user_geo_profile") or {"enabled": False})
+    fetch_meta = dict(
+        live_cache.get("fetch_meta")
+        or {
+            "request_id": f"CACHE-{datetime.now().strftime('%H%M%S')}",
+            "attempts": 0,
+            "elapsed": 0.0,
+            "degraded": False,
+            "used_stable_fallback": False,
+        }
+    )
     st.toast("已快速刷新智能目标（复用当前实时数据）", icon="⚡")
 else:
-    live_news_raw, live_events_raw, live_updated_at, live_warnings_raw = get_realtime_feeds(
+    live_news_raw, live_events_raw, live_updated_at, live_warnings_raw, fetch_meta = _load_realtime_feeds_with_retry(
         refresh_bucket,
         preferred_city=preferred_fetch_city,
     )
@@ -5458,6 +5592,32 @@ else:
         live_warnings.extend(geo_warnings)
 
     live_news = [{**item} for item in live_news_raw]
+
+    stable_context_key = preferred_fetch_city or "__auto__"
+    stable_context_map = dict(st.session_state.get("stable_live_context_by_city") or {})
+    current_degraded = bool(fetch_meta.get("degraded"))
+
+    if current_degraded and stable_context_key in stable_context_map:
+        stable_ref = dict(stable_context_map.get(stable_context_key) or {})
+        stable_news = [{**item} for item in (stable_ref.get("live_news") or [])]
+        stable_events = [{**item} for item in (stable_ref.get("live_events") or [])]
+        if stable_news and stable_events:
+            live_news = stable_news
+            live_events = stable_events
+            live_updated_at = str(stable_ref.get("live_updated_at", live_updated_at))
+            user_geo_profile = dict(stable_ref.get("user_geo_profile") or user_geo_profile)
+            fetch_meta["used_stable_fallback"] = True
+            live_warnings.append(f"实时数据波动，已切换到最近一次可用结果（{live_updated_at}）")
+
+    if (not current_degraded) and live_news and live_events:
+        stable_context_map[stable_context_key] = {
+            "live_news": [{**item} for item in live_news],
+            "live_events": [{**item} for item in live_events],
+            "live_updated_at": live_updated_at,
+            "user_geo_profile": dict(user_geo_profile),
+        }
+        st.session_state["stable_live_context_by_city"] = stable_context_map
+
     st.session_state["live_context_cache"] = {
         "refresh_bucket": refresh_bucket,
         "live_news": [{**item} for item in live_news],
@@ -5467,7 +5627,39 @@ else:
         "live_warnings": list(live_warnings),
         "user_geo_profile": dict(user_geo_profile),
         "preferred_fetch_city": preferred_fetch_city,
+        "fetch_meta": dict(fetch_meta),
     }
+
+fetch_observations = list(st.session_state.get("fetch_observations") or [])
+fetch_observations.append(
+    {
+        "request_id": str(fetch_meta.get("request_id", "")),
+        "attempts": int(fetch_meta.get("attempts", 0) or 0),
+        "elapsed": float(fetch_meta.get("elapsed", 0.0) or 0.0),
+        "degraded": bool(fetch_meta.get("degraded")),
+        "used_stable_fallback": bool(fetch_meta.get("used_stable_fallback")),
+        "ts": datetime.now().strftime("%H:%M:%S"),
+    }
+)
+st.session_state["fetch_observations"] = fetch_observations[-120:]
+
+recent_fetch = st.session_state["fetch_observations"][-LIVE_FETCH_MONITOR_WINDOW:]
+recent_success = sum(1 for item in recent_fetch if (not item.get("degraded")) or item.get("used_stable_fallback"))
+recent_rate = (recent_success * 100.0 / len(recent_fetch)) if recent_fetch else 100.0
+recent_elapsed = [float(item.get("elapsed", 0.0) or 0.0) for item in recent_fetch if float(item.get("elapsed", 0.0) or 0.0) > 0]
+recent_p50 = _percentile(recent_elapsed, 0.50)
+recent_p95 = _percentile(recent_elapsed, 0.95)
+recent_p99 = _percentile(recent_elapsed, 0.99)
+
+if len(recent_fetch) >= 5:
+    if recent_rate < LIVE_FETCH_SLO_SUCCESS_RATE:
+        live_warnings.append(
+            f"近{len(recent_fetch)}次链路成功率 {recent_rate:.1f}% 低于目标 {LIVE_FETCH_SLO_SUCCESS_RATE:.0f}%"
+        )
+    if recent_p95 > LIVE_FETCH_SLO_TARGET_P95_SECONDS:
+        live_warnings.append(
+            f"近{len(recent_fetch)}次链路P95 {recent_p95:.2f}s 超过目标 {LIVE_FETCH_SLO_TARGET_P95_SECONDS:.1f}s"
+        )
 
 if user_geo_profile.get("enabled"):
     city = _canonical_city_name(user_geo_profile.get("anchor_city") or user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "") or "未知城市"
@@ -5503,6 +5695,14 @@ hero_goal_hint = _goal_headline_text(selected_boss.get("current_goal", ""))
 mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动；手动城市优先，未填则按IP进行路程过滤；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
 update_caption.caption(f"更新时间：{live_updated_at}")
+monitor_caption.caption(
+    (
+        f"链路追踪：请求ID {fetch_meta.get('request_id', 'N/A')} ｜ 尝试 {int(fetch_meta.get('attempts', 0) or 0)} 次 ｜ 加载耗时 {float(fetch_meta.get('elapsed', 0.0) or 0.0):.2f}s"
+        f" ｜ 近{len(recent_fetch)}次成功率 {recent_rate:.1f}%"
+        f" ｜ P50/P95/P99={recent_p50:.2f}/{recent_p95:.2f}/{recent_p99:.2f}s"
+        f" ｜ SLO目标={LIVE_FETCH_SLO_TARGET_P50_SECONDS:.1f}/{LIVE_FETCH_SLO_TARGET_P95_SECONDS:.1f}/{LIVE_FETCH_SLO_TARGET_P99_SECONDS:.1f}s"
+    )
+)
 if live_warnings:
     warning_caption.caption("系统提示：" + "；".join(live_warnings))
 
