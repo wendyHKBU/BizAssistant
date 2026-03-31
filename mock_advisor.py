@@ -102,7 +102,26 @@ MIROFISH_TEMPLATES = {
 
 def _extract_terms(text: str) -> list[str]:
     terms = re.findall(r"[A-Za-z]{2,}|[\u4e00-\u9fff]{2,}", (text or "").lower())
-    ignored = {"公司", "团队", "顾问", "老板", "方向", "行业", "服务", "业务"}
+    ignored = {
+        "公司",
+        "团队",
+        "顾问",
+        "老板",
+        "方向",
+        "行业",
+        "服务",
+        "业务",
+        "客户",
+        "增长",
+        "提升",
+        "推进",
+        "机会",
+        "合作",
+        "项目",
+        "计划",
+        "当前",
+        "今日",
+    }
     return [term for term in terms if term not in ignored]
 
 
@@ -111,6 +130,43 @@ def _keyword_parts(keyword: str) -> list[str]:
     if len(kw) < 4:
         return [kw] if kw else []
     return list(dict.fromkeys([kw[:2], kw[-2:], kw[:3], kw[-3:]]))
+
+
+def _term_ngrams(term: str, n: int = 2) -> set[str]:
+    clean = re.sub(r"\s+", "", str(term or "").lower())
+    if not clean:
+        return set()
+    if len(clean) <= n:
+        return {clean}
+    return {clean[i:i + n] for i in range(len(clean) - n + 1)}
+
+
+def _semantic_overlap_score(profile_terms: list[str], text: str) -> int:
+    if not profile_terms:
+        return 0
+
+    news_terms = _extract_terms(text)
+    if not news_terms:
+        return 0
+
+    profile_tokens: set[str] = set()
+    for term in profile_terms[:20]:
+        profile_tokens.update(_term_ngrams(term, n=2))
+
+    news_tokens: set[str] = set()
+    for term in news_terms[:28]:
+        news_tokens.update(_term_ngrams(term, n=2))
+
+    if not profile_tokens or not news_tokens:
+        return 0
+
+    overlap = len(profile_tokens & news_tokens)
+    if overlap <= 0:
+        return 0
+
+    union_size = len(profile_tokens | news_tokens)
+    jaccard = (overlap / union_size) if union_size else 0
+    return min(22, int(overlap * 2 + jaccard * 36))
 
 
 def _infer_news_category_preferences(boss: dict) -> set[str]:
@@ -146,13 +202,27 @@ def match_news_for_boss(boss: dict, news_items: list[dict]) -> list[dict]:
     industry_terms = _extract_terms(boss.get("industry", ""))
     goal_terms = _extract_terms(boss.get("current_goal", ""))[:8]
     category_preferences = _infer_news_category_preferences(boss)
+    category_pref_lowers = {str(cat).lower() for cat in category_preferences}
+    profile_terms = _extract_terms(
+        " ".join(
+            [
+                boss.get("industry", ""),
+                boss.get("current_goal", ""),
+                " ".join(boss.get("keywords", [])),
+            ]
+        )
+    )
 
     for news in news_items:
-        title = news["title"].lower()
-        category = news.get("category", "").lower()
+        title = str(news["title"]).lower()
+        raw_category = str(news.get("category", ""))
+        category = raw_category.lower()
+        description = str(news.get("description", "")).lower()
+        source = str(news.get("source", "")).lower()
+        full_text = f"{title} {category} {description} {source}"
 
         # 检查忽略词
-        if any(ig in title or ig in category for ig in ignore_keywords):
+        if any(ig in full_text for ig in ignore_keywords):
             continue
 
         # 计算相关度分数
@@ -160,23 +230,28 @@ def match_news_for_boss(boss: dict, news_items: list[dict]) -> list[dict]:
         matched_keywords = []
 
         for kw in boss_keywords:
-            if kw in title or kw in category:
-                score += 20
+            if kw in full_text:
+                score += 24
                 matched_keywords.append(kw)
             else:
                 parts = _keyword_parts(kw)
-                if any(part and (part in title or part in category) for part in parts):
+                if any(part and part in full_text for part in parts):
                     score += 8
                     matched_keywords.append(kw)
 
+        semantic_score = _semantic_overlap_score(profile_terms, full_text)
+        score += semantic_score
+
         # 类别偏好加分，避免“抓到了但全空白”
-        if news.get("category") in category_preferences:
-            score += 12
+        if category in category_pref_lowers:
+            score += 10
+        if category == "政策" and (category in category_pref_lowers or semantic_score >= 8 or matched_keywords):
+            score += 5
 
         # 行业匹配加分
         for word in industry_terms:
             if len(word) > 1 and word in title:
-                score += 15
+                score += 14
                 break
 
         # 目标相关加分
@@ -189,7 +264,15 @@ def match_news_for_boss(boss: dict, news_items: list[dict]) -> list[dict]:
                 score += 6
                 break
 
-        if score >= 10:
+        # 强惩罚：类别不在偏好且缺少语义命中时，直接降分。
+        if category and category_pref_lowers and category not in category_pref_lowers and not matched_keywords and semantic_score < 6:
+            score -= 22
+        if category == "政策" and "政策" not in category_pref_lowers and not matched_keywords and semantic_score < 8:
+            score -= 16
+        if not matched_keywords and semantic_score < 6 and category not in category_pref_lowers:
+            score -= 18
+
+        if score >= 24:
             scored.append({
                 **news,
                 "score": min(score, 98),

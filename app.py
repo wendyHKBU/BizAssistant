@@ -493,7 +493,25 @@ def _normalize_event_text(text: str, max_len: int = 150) -> str:
 
 def _extract_profile_terms(text: str) -> list[str]:
     terms = re.findall(r"[A-Za-z]{2,}|[\u4e00-\u9fff]{2,}", (text or "").lower())
-    ignored = {"公司", "团队", "方向", "行业", "服务", "业务"}
+    ignored = {
+        "公司",
+        "团队",
+        "方向",
+        "行业",
+        "服务",
+        "业务",
+        "客户",
+        "老板",
+        "增长",
+        "提升",
+        "推进",
+        "机会",
+        "合作",
+        "项目",
+        "计划",
+        "当前",
+        "今日",
+    }
     return [term for term in terms if term not in ignored]
 
 
@@ -2446,6 +2464,43 @@ def _match_profile_terms(text: str, terms: list[str], limit: int = 6) -> list[st
     return hits
 
 
+def _term_ngrams(term: str, n: int = 2) -> set[str]:
+    clean = re.sub(r"\s+", "", str(term or "").lower())
+    if not clean:
+        return set()
+    if len(clean) <= n:
+        return {clean}
+    return {clean[i:i + n] for i in range(len(clean) - n + 1)}
+
+
+def _semantic_overlap_score(profile_terms: list[str], text: str) -> int:
+    if not profile_terms:
+        return 0
+
+    news_terms = _extract_profile_terms(text)
+    if not news_terms:
+        return 0
+
+    profile_tokens: set[str] = set()
+    for term in profile_terms[:20]:
+        profile_tokens.update(_term_ngrams(term, n=2))
+
+    news_tokens: set[str] = set()
+    for term in news_terms[:28]:
+        news_tokens.update(_term_ngrams(term, n=2))
+
+    if not profile_tokens or not news_tokens:
+        return 0
+
+    overlap = len(profile_tokens & news_tokens)
+    if overlap <= 0:
+        return 0
+
+    union_size = len(profile_tokens | news_tokens)
+    jaccard = (overlap / union_size) if union_size else 0
+    return min(24, int(overlap * 2 + jaccard * 40))
+
+
 def _news_relevance_score(boss: dict, item: dict) -> tuple[int, list[str]]:
     ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
     boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
@@ -2465,15 +2520,17 @@ def _news_relevance_score(boss: dict, item: dict) -> tuple[int, list[str]]:
     keyword_hits = _match_profile_terms(text, boss_keywords, limit=4)
     term_hits = _match_profile_terms(text, profile_terms, limit=6)
     extra_term_hits = [term for term in term_hits if term not in keyword_hits]
+    semantic_score = _semantic_overlap_score(profile_terms, text)
 
     score = 0
     score += len(keyword_hits) * 24
     score += len(extra_term_hits) * 9
+    score += semantic_score
 
     if category in news_prefs:
-        score += 22
-    if category == "政策":
-        score += 10
+        score += 18
+    if category == "政策" and (category in news_prefs or keyword_hits or semantic_score >= 8):
+        score += 6
     if city and city in text:
         score += 10
     if any(marker in source for marker in ["中国政府网", "百度民生", "新华社", "人民网"]):
@@ -2485,13 +2542,20 @@ def _news_relevance_score(boss: dict, item: dict) -> tuple[int, list[str]]:
             continue
         if any(str(marker).lower() in text for marker in markers[:4]):
             unrelated_hits += 1
-    score -= min(18, unrelated_hits * 6)
+    score -= min(24, unrelated_hits * 8)
 
-    if not keyword_hits and not extra_term_hits and category not in news_prefs:
-        score -= 12
+    if category and news_prefs and category not in news_prefs and not keyword_hits and semantic_score < 6:
+        score -= 22
+    if category == "政策" and "政策" not in news_prefs and not keyword_hits and semantic_score < 8:
+        score -= 16
+
+    if not keyword_hits and not extra_term_hits and semantic_score < 8 and category not in news_prefs:
+        score -= 24
 
     score = max(0, min(96, score))
     matched = list(dict.fromkeys(keyword_hits + extra_term_hits))[:3]
+    if semantic_score >= 10 and not matched:
+        matched = _match_profile_terms(text, profile_terms, limit=2)
     if category in news_prefs and category and category not in matched:
         matched.append(category)
 
@@ -2565,9 +2629,9 @@ def _news_relevance_tier(boss: dict, item: dict) -> int:
     score, _ = _news_relevance_score(boss, item)
     if score < 0:
         return -1
-    if score >= 46:
+    if score >= 52:
         return 2
-    if score >= 22:
+    if score >= 30:
         return 1
     return 0
 
@@ -3113,12 +3177,6 @@ def _minimum_online_city_events(boss: dict, primary_events: list[dict], backup_e
 
 
 def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2, boss: dict | None = None) -> list[dict]:
-    source_weight = {
-        "中国政府网政策": 30,
-        "百度民生": 24,
-        "百度财经": 18,
-    }
-
     boss_ref = boss or {}
     boss_keywords = [kw.lower() for kw in boss_ref.get("keywords", [])]
     news_prefs = _infer_boss_news_preferences(boss_ref) if boss_ref else set()
@@ -3135,69 +3193,71 @@ def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2, boss: dic
         seen_titles.add(key)
         deduped.append(item)
 
-    scored: list[tuple[int, int, int, dict]] = []
+    scored: list[tuple[int, int, dict]] = []
     for item in deduped:
-        category = str(item.get("category", ""))
-        if category != "政策":
+        relevance_score, matched = _news_relevance_score(boss_ref, item)
+        if relevance_score < 0:
             continue
 
-        source = str(item.get("source", ""))
-        weight = source_weight.get(source, 12)
-        base_score = 38 + weight // 2
+        category = str(item.get("category", ""))
         title_lower = str(item.get("title", "")).lower()
         kw_hits = sum(1 for kw in boss_keywords if kw and kw in title_lower)
-        related_bonus = 14 if kw_hits >= 1 else 0
-        if news_prefs and category in news_prefs:
-            related_bonus += 8
+        pref_hit = bool(news_prefs and category in news_prefs)
+
+        # 强约束：既不命中关键词也不命中偏好，且语义分偏低，则不进入最小展示池。
+        if boss_keywords and kw_hits == 0 and not pref_hit and relevance_score < 30:
+            continue
+        if relevance_score < 24 and not pref_hit:
+            continue
+
+        bonus = 0
+        if pref_hit:
+            bonus += 8
+        if kw_hits:
+            bonus += min(12, kw_hits * 6)
+        if category == "政策" and "政策" in news_prefs:
+            bonus += 4
 
         news_copy = {
             **item,
-            "score": max(int(item.get("score", 0) or 0), min(base_score + related_bonus, 78)),
-            "matched": item.get("matched") or ([boss_keywords[0]] if boss_keywords and kw_hits else ["本土政策"]),
-            "source": source or "本土政策源",
+            "score": max(int(item.get("score", 0) or 0), min(88, int(relevance_score) + bonus)),
+            "matched": item.get("matched") or (matched[:3] if matched else ([category] if category else ["行业热点"])),
+            "source": item.get("source") or "本土热点源",
         }
-        tier = 2 if kw_hits >= 1 else 1
-        scored.append((tier, weight, int(news_copy["score"]), news_copy))
 
-    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    selected = [item[3] for item in scored[:top_n]]
+        tier = 3 if (kw_hits >= 1 or relevance_score >= 58) else (2 if (pref_hit or relevance_score >= 38) else 1)
+        scored.append((tier, int(news_copy["score"]), news_copy))
 
-    # 若政策不足，补充与行业偏好一致的非政策热点
-    if len(selected) < top_n and news_prefs:
-        for item in deduped:
-            if len(selected) >= top_n:
-                break
-            category = str(item.get("category", ""))
-            title_lower = str(item.get("title", "")).lower()
-            if category == "政策" or category not in news_prefs:
-                continue
-            if boss_keywords and not any(kw in title_lower for kw in boss_keywords):
-                continue
-            if any(str(item.get("title", "")).strip() == str(s.get("title", "")).strip() for s in selected):
-                continue
-            selected.append(
-                {
-                    **item,
-                    "score": max(int(item.get("score", 0) or 0), 52),
-                    "matched": item.get("matched") or [category],
-                    "source": item.get("source") or "行业热点补位",
-                }
-            )
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = [item[2] for item in scored[:top_n]]
 
     if len(selected) < top_n:
-        for item in DEFAULT_NEWS:
+        selected_titles = {
+            re.sub(r"\s+", " ", str(item.get("title", "")).lower()).strip()
+            for item in selected
+        }
+
+        default_candidates: list[dict] = []
+        if news_prefs:
+            default_candidates.extend([item for item in DEFAULT_NEWS if item.get("category") in news_prefs])
+        default_candidates.extend([item for item in DEFAULT_NEWS if item.get("category") != "政策"])
+        if "政策" in news_prefs:
+            default_candidates.extend([item for item in DEFAULT_NEWS if item.get("category") == "政策"])
+
+        for item in default_candidates:
             if len(selected) >= top_n:
                 break
-            if item.get("category") != "政策":
+            title_key = re.sub(r"\s+", " ", str(item.get("title", "")).lower()).strip()
+            if not title_key or title_key in selected_titles:
                 continue
-            if any(str(item.get("title", "")).strip() == str(s.get("title", "")).strip() for s in selected):
-                continue
+            selected_titles.add(title_key)
+            category = str(item.get("category", "行业热点"))
             selected.append(
                 {
                     **item,
-                    "score": 46,
-                    "matched": ["本土政策"],
-                    "source": "内置政策样本",
+                    "score": max(int(item.get("score", 0) or 0), 48),
+                    "matched": [category],
+                    "source": "内置行业样本",
                 }
             )
 
@@ -3546,6 +3606,43 @@ def render_timeline(actions: list[dict]) -> None:
             return '高';
         }}
 
+        function priorityRank(level) {{
+            if (level === '高') return 0;
+            if (level === '中') return 1;
+            if (level === '低') return 2;
+            return 3;
+        }}
+
+        function parseTimeRank(raw) {{
+            const text = String(raw || '').trim();
+            const hm = text.match(/([01]?[0-9]|2[0-3]):([0-5][0-9])/);
+            if (hm) {{
+                return Number(hm[1]) * 60 + Number(hm[2]);
+            }}
+            if (text.includes('今天')) return 24 * 60;
+            if (text.includes('明天')) return 48 * 60;
+            if (text.includes('待确认')) return 72 * 60;
+            return 60 * 60;
+        }}
+
+        function reorderItemsByPriority() {{
+            items = items
+                .map((item, idx) => ({{ ...item, __idx: idx }}))
+                .sort((a, b) => {{
+                    const priDiff = priorityRank(a.priority) - priorityRank(b.priority);
+                    if (priDiff !== 0) return priDiff;
+
+                    const timeDiff = parseTimeRank(a.time) - parseTimeRank(b.time);
+                    if (timeDiff !== 0) return timeDiff;
+
+                    return a.__idx - b.__idx;
+                }})
+                .map((item) => {{
+                    const {{ __idx, ...rest }} = item;
+                    return rest;
+                }});
+        }}
+
         function normalizeTimeInput(raw) {{
             const text = String(raw || '').trim();
             if (!text) return '今天';
@@ -3626,6 +3723,7 @@ def render_timeline(actions: list[dict]) -> None:
         }}
 
         function render() {{
+            reorderItemsByPriority();
             root.innerHTML = '';
             items.forEach((item, idx) => {{
                 const itemType = item.type || inferScheduleType(`${{item.title || ''}} ${{item.reason || ''}}`);
@@ -3649,6 +3747,7 @@ def render_timeline(actions: list[dict]) -> None:
                         event.preventDefault();
                         event.stopPropagation();
                         items[idx].priority = cyclePriority(items[idx].priority || '中');
+                        reorderItemsByPriority();
                         render();
                         showHint('已切换优先级');
                     }});
@@ -3680,11 +3779,13 @@ def render_timeline(actions: list[dict]) -> None:
                             reason: buildReasonByType(taskType),
                         }};
                         items.splice(idx + 1, 0, newItem);
+                        reorderItemsByPriority();
                         render();
                         showHint(`已新增日程（${{taskType}}）`);
                     }} else if (deltaX < -72) {{
                         if (items.length > 1) {{
                             items.splice(idx, 1);
+                            reorderItemsByPriority();
                             render();
                             showHint('已左滑删除日程');
                         }} else {{
@@ -4368,7 +4469,7 @@ if not reuse_recommendation:
         guaranteed_news = _minimum_local_policy_news(industry_news_pool + all_news + live_news + DEFAULT_NEWS, top_n=2, boss=selected_boss)
         if guaranteed_news:
             matched_news = guaranteed_news
-            live_warnings.append("已启用最小展示保障：固定展示2条行业相关政策/热点")
+            live_warnings.append("已启用最小展示保障：固定展示2条行业相关热点")
 
     matched_news = _attach_news_actions(matched_news, seed=refresh_bucket + int(st.session_state.get("smart_goal_seed", 0)))
     st.session_state["recommendation_cache"] = {
