@@ -131,6 +131,22 @@ EVENT_MARKERS = ["峰会", "论坛", "沙龙", "路演", "训练营", "展会", 
 
 CITY_MARKERS = ["深圳", "上海", "广州", "北京", "杭州", "成都", "武汉", "南京", "苏州", "线上"]
 
+NON_MAINLAND_LOCATION_MARKERS = [
+    "香港",
+    "澳门",
+    "台湾",
+    "海外",
+    "新加坡",
+    "马来西亚",
+    "美国",
+    "英国",
+    "日本",
+    "韩国",
+    "欧洲",
+    "北美",
+    "澳大利亚",
+]
+
 
 def _google_rss_url(query: str) -> str:
     return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
@@ -600,6 +616,11 @@ def _extract_huodongxing_quick_events(html_text: str, keyword: str) -> list[dict
     return events
 
 
+def _is_mainland_event(event: dict) -> bool:
+    text = f"{event.get('title', '')} {event.get('location', '')}"
+    return not any(marker in text for marker in NON_MAINLAND_LOCATION_MARKERS)
+
+
 def _fetch_huodongxing_events(max_items: int = 18) -> list[dict]:
     collected: list[dict] = []
     seen_urls = set()
@@ -617,6 +638,8 @@ def _fetch_huodongxing_events(max_items: int = 18) -> list[dict]:
         for event in candidates:
             event_url = event.get("url", "")
             if not event_url or event_url in seen_urls:
+                continue
+            if not _is_mainland_event(event):
                 continue
             seen_urls.add(event_url)
             collected.append(event)
