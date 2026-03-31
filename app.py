@@ -1850,6 +1850,13 @@ def inject_styles() -> None:
             font-size: 0.8rem;
         }
 
+        .model-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.84rem;
+            margin-top: 0.28rem;
+        }
+
         .model-card {
             background: linear-gradient(160deg, #ffffff, #f8fbff);
             border: 1px solid rgba(15, 63, 121, 0.11);
@@ -1931,6 +1938,10 @@ def inject_styles() -> None:
         @media (max-width: 600px) {
             .waterfall {
                 column-count: 1;
+            }
+
+            .model-grid {
+                grid-template-columns: 1fr;
             }
         }
 
@@ -2264,18 +2275,18 @@ def compute_opportunity_index(schedule: list[dict], matched_events: list[dict], 
     return idx, level
 
 
-def render_hero(boss: dict, score: int, level: str, today_str: str) -> None:
+def render_hero(boss: dict, score: int, level: str, today_str: str, city_display: str, goal_hint: str) -> None:
     hero_html = block_html(
         f"""
         <section class="hero">
           <div class="hero-grid">
             <div>
-              <div class="hero-title">今日机会指数仪表盘</div>
-              <div class="hero-sub">{html.escape(today_str)} ｜ 为 {html.escape(boss['name'])} 定制。先执行关键动作，再放大高相关机会。</div>
+                            <div class="hero-title">今日商机指数仪表盘</div>
+                            <div class="hero-sub">{html.escape(today_str)} ｜ 为 {html.escape(boss['name'])} 定制。</div>
               <div class="hero-chip-row">
                 <span class="hero-chip">{html.escape(boss['industry'])}</span>
-                <span class="hero-chip">{html.escape(boss['city'])}</span>
-                <span class="hero-chip">目标：{html.escape(boss['current_goal'])}</span>
+                                <span class="hero-chip">城市：{html.escape(city_display)}</span>
+                                <span class="hero-chip">目标：{html.escape(goal_hint)}</span>
               </div>
             </div>
             <div class="index-panel">
@@ -2343,8 +2354,8 @@ def render_kpi_counter(schedule_count: int, event_count: int, news_count: int, s
 
 
 def render_timeline(actions: list[dict]) -> None:
-    st.markdown("<div class='section-title'>1. 今天该做什么</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-desc'>先执行最能推进目标的动作，确保一天有结果，而不是只有忙碌感。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='split-title'>今天该做什么</div>", unsafe_allow_html=True)
+    st.markdown("<div class='split-desc'>先执行最能推进目标的动作，确保一天有结果，而不是只有忙碌感。</div>", unsafe_allow_html=True)
 
     if not actions:
         st.info("当前没有可执行动作，建议先补充今日热点或切换老板画像。")
@@ -2498,8 +2509,6 @@ def _build_travel_entries(event: dict, geo_profile: dict | None = None) -> list[
 
 
 def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_geo_profile: dict | None = None) -> None:
-    st.markdown("<div class='section-title'>2. 值得做</div>", unsafe_allow_html=True)
-
     has_events = bool(matched_events)
     has_news = bool(matched_news)
 
@@ -2586,8 +2595,8 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
 
 
 def render_model_explainer(boss: dict, matched_news: list[dict]) -> None:
-    st.markdown("<div class='section-title'>3. 模型解释与推演</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-desc'>最后再看模型层：给你一个联系人建议和MiroFish推演，辅助判断推进节奏。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='split-title'>商机推演</div>", unsafe_allow_html=True)
+    st.markdown("<div class='split-desc'>最后再看模型层：给你一个联系人建议和MiroFish推演，辅助判断推进节奏。</div>", unsafe_allow_html=True)
 
     if not matched_news:
         st.info("暂无可解释的高相关热点，模型推演暂不触发。")
@@ -2598,60 +2607,59 @@ def render_model_explainer(boss: dict, matched_news: list[dict]) -> None:
     relevance = "高相关" if top_news.get("score", 0) >= 60 else "中相关"
     miro = get_mirofish(top_news, relevance)
 
-    left_col, right_col = st.columns(2)
-
-    with left_col:
-        if network:
-            st.markdown(
-                block_html(
-                    f"""
-                    <div class="model-card">
-                      <div class="model-title">人脉建议</div>
-                      <div class="model-body">建议联系：{html.escape(network['name'])}（{html.escape(network['role'])}）<br>
-                      联系理由：{html.escape(network['reason'])}</div>
-                    </div>
-                    """
-                ),
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                block_html(
-                    """
-                    <div class="model-card">
-                      <div class="model-title">人脉建议</div>
-                      <div class="model-body">当前画像缺少可联系人脉，建议先补充 3-5 位关键联系人用于后续提醒。</div>
-                    </div>
-                    """
-                ),
-                unsafe_allow_html=True,
-            )
-
-    with right_col:
-        advice = "推进" if miro.get("advice") == "推进" else "观察"
-        st.markdown(
-            block_html(
-                f"""
-                <div class="model-card">
-                  <div class="model-title">MiroFish 快速推演</div>
-                  <div class="model-body">最高价值商机：{html.escape(top_news.get('title', '重点热点')[:36])}...<br>
-                  主要风险：{html.escape(miro.get('risk', '市场波动'))}<br>
-                  AI建议：{html.escape(advice)}</div>
-                  <div class="model-metric">
-                    <div class="metric-box">
-                      <div class="metric-name">时间窗口</div>
-                      <div class="metric-val">{html.escape(miro.get('window', '2-3个月'))}</div>
-                    </div>
-                    <div class="metric-box">
-                      <div class="metric-name">预估收益</div>
-                      <div class="metric-val">{html.escape(miro.get('revenue', '¥5万 - ¥15万'))}</div>
-                    </div>
-                  </div>
-                </div>
-                """
-            ),
-            unsafe_allow_html=True,
+    if network:
+        network_html = block_html(
+            f"""
+            <div class="model-card">
+              <div class="model-title">人脉建议</div>
+              <div class="model-body">建议联系：{html.escape(network['name'])}（{html.escape(network['role'])}）<br>
+              联系理由：{html.escape(network['reason'])}</div>
+            </div>
+            """
         )
+    else:
+        network_html = block_html(
+            """
+            <div class="model-card">
+              <div class="model-title">人脉建议</div>
+              <div class="model-body">当前画像缺少可联系人脉，建议先补充 3-5 位关键联系人用于后续提醒。</div>
+            </div>
+            """
+        )
+
+    advice = "推进" if miro.get("advice") == "推进" else "观察"
+    miro_html = block_html(
+        f"""
+        <div class="model-card">
+          <div class="model-title">快速推演</div>
+          <div class="model-body">最高价值商机：{html.escape(top_news.get('title', '重点热点')[:36])}...<br>
+          主要风险：{html.escape(miro.get('risk', '市场波动'))}<br>
+          AI建议：{html.escape(advice)}</div>
+          <div class="model-metric">
+            <div class="metric-box">
+              <div class="metric-name">时间窗口</div>
+              <div class="metric-val">{html.escape(miro.get('window', '2-3个月'))}</div>
+            </div>
+            <div class="metric-box">
+              <div class="metric-name">预估收益</div>
+              <div class="metric-val">{html.escape(miro.get('revenue', '¥5万 - ¥15万'))}</div>
+            </div>
+          </div>
+        </div>
+        """
+    )
+
+    st.markdown(
+        block_html(
+            f"""
+            <div class="model-grid">
+              {network_html}
+              {miro_html}
+            </div>
+            """
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 inject_styles()
@@ -2663,7 +2671,28 @@ with st.sidebar:
 
     boss_options = {f"{b['name']} · {b['industry']}": b for b in BOSSES}
     selected_label = st.selectbox("选择老板画像", list(boss_options.keys()))
-    selected_boss = boss_options[selected_label]
+    selected_boss_base = boss_options[selected_label]
+
+    manual_city_input = st.text_input(
+        "城市（IP识别或手动输入）",
+        value="",
+        placeholder="留空则优先使用IP识别",
+    )
+
+    goal_input_mode = st.selectbox("目标来源", ["智能推荐筛选", "手动输入"], index=0)
+    manual_goal_input = ""
+    if goal_input_mode == "手动输入":
+        manual_goal_input = st.text_input(
+            "手动目标",
+            value="",
+            placeholder="例如：拓展新能源/科技客户，建立AI时代差异化",
+        )
+    else:
+        st.caption("目标：可以手动输入或智能推荐筛选")
+
+    selected_boss = dict(selected_boss_base)
+    if goal_input_mode == "手动输入" and manual_goal_input.strip():
+        selected_boss["current_goal"] = manual_goal_input.strip()
 
     st.divider()
     custom_news_text = st.text_area(
@@ -2711,6 +2740,16 @@ if user_geo_profile.get("enabled"):
 else:
     geo_caption.caption("IP定位：未识别（暂未启用1-2小时硬过滤）")
     scope_caption.caption("")
+
+manual_city = manual_city_input.strip()
+resolved_city = manual_city
+if not resolved_city:
+    resolved_city = str(user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "").strip()
+if resolved_city:
+    selected_boss["city"] = resolved_city
+
+hero_city_display = resolved_city or "IP识别或手动输入"
+hero_goal_hint = "可以手动输入或智能推荐筛选"
 
 mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动 + IP路程硬过滤；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
@@ -2765,7 +2804,7 @@ today_str = datetime.now().strftime("%Y年%m月%d日")
 score, score_label = compute_opportunity_index(schedule, matched_events, matched_news)
 actions = build_today_actions(selected_boss, matched_events, matched_news)
 
-render_hero(selected_boss, score, score_label, today_str)
+render_hero(selected_boss, score, score_label, today_str, hero_city_display, hero_goal_hint)
 
 render_kpi_counter(
     schedule_count=len(actions),
