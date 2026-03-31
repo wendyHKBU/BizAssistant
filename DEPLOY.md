@@ -22,6 +22,7 @@
 - 活动推荐已启用“用户IP + 2小时路程大城市硬过滤”，线下活动会附带时间成本和交通成本估算。
 - IP定位依赖请求头（如 `X-Forwarded-For`）和公开地理解析服务（`ipwho.is` / `ipapi.co`），均无需 key。
 - 若运行环境无法提供真实用户IP，系统会提示并临时关闭该硬过滤，不影响基础功能。
+- 当严格匹配和宽松匹配都失败时，系统会启用最小展示保障：固定展示2条线上活动（优先同城）+2条本土政策热点（中国政府网/百度政策流，必要时回退内置政策样本）。
 - 以下两个国际活动 API key 现在是“可选补充源”（不配置也能跑）：
 - `EVENTBRITE_API_TOKEN`（Eventbrite Personal OAuth token）
 - `TICKETMASTER_API_KEY`（Ticketmaster Discovery API key）

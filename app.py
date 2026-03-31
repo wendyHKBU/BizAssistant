@@ -1704,6 +1704,146 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
     return scored[:top_n]
 
 
+def _is_online_event(event: dict) -> bool:
+    text = f"{event.get('format', '')} {event.get('location', '')}".lower()
+    return (
+        event.get("format") == "线上"
+        or "线上" in text
+        or "直播" in text
+        or "webinar" in text
+        or "online" in text
+        or "腾讯会议" in text
+        or "zoom" in text
+    )
+
+
+def _minimum_online_city_events(boss: dict, primary_events: list[dict], backup_events: list[dict], top_n: int = 2) -> tuple[list[dict], bool]:
+    city = boss.get("city", "")
+    merged = list(primary_events) + list(backup_events)
+
+    deduped: list[dict] = []
+    seen_titles = set()
+    for event in merged:
+        title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        deduped.append(event)
+
+    scored: list[tuple[int, int, dict]] = []
+    for event in deduped:
+        if not _is_online_event(event):
+            continue
+
+        event_copy = {**event}
+        if "travel_note" not in event_copy:
+            event_copy = _attach_online_trip_fields(event_copy)
+
+        text = f"{event_copy.get('title', '')} {event_copy.get('location', '')} {event_copy.get('description', '')}"
+        city_match = bool(city and city in text)
+        base_score = 54 if city_match else 38
+        if event_copy.get("value") == "高":
+            base_score += 6
+
+        event_copy["score"] = max(int(event_copy.get("score", 0) or 0), min(base_score, 72))
+        event_copy["matched_keywords"] = event_copy.get("matched_keywords") or ([f"{city}线上"] if city_match else ["线上可达"])
+        detail = str(event_copy.get("source_detail", "本土活动源"))
+        suffix = "同城线上保障" if city_match else "全国线上补位"
+        event_copy["source_detail"] = f"{detail} · {suffix}"
+        if not event_copy.get("registration_deadline"):
+            event_copy["registration_deadline"] = "详见活动页"
+
+        scored.append((1 if city_match else 0, int(event_copy["score"]), event_copy))
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = [item[2] for item in scored[:top_n]]
+
+    if len(selected) < top_n:
+        for event in TODAY_EVENTS:
+            if len(selected) >= top_n:
+                break
+            if not _is_online_event(event):
+                continue
+            if any(re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip() == re.sub(r"\s+", " ", str(s.get("title", "")).lower()).strip() for s in selected):
+                continue
+
+            event_copy = _attach_online_trip_fields(event)
+            text = f"{event_copy.get('title', '')} {event_copy.get('location', '')} {event_copy.get('description', '')}"
+            city_match = bool(city and city in text)
+            event_copy["score"] = 50 if city_match else 42
+            event_copy["matched_keywords"] = [f"{city}线上"] if city_match else ["线上可达"]
+            event_copy["source_detail"] = str(event_copy.get("source_detail", "内置活动池")) + " · 最小展示保障"
+            selected.append(event_copy)
+
+    city_online_count = 0
+    if city:
+        for event in selected:
+            text = f"{event.get('title', '')} {event.get('location', '')} {event.get('description', '')}"
+            if city in text:
+                city_online_count += 1
+
+    return selected[:top_n], city_online_count >= top_n
+
+
+def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2) -> list[dict]:
+    source_weight = {
+        "中国政府网政策": 30,
+        "百度民生": 24,
+        "百度财经": 18,
+    }
+
+    deduped: list[dict] = []
+    seen_titles = set()
+    for item in news_items:
+        title = str(item.get("title", "")).strip()
+        if not title:
+            continue
+        key = re.sub(r"\s+", " ", title.lower()).strip()
+        if key in seen_titles:
+            continue
+        seen_titles.add(key)
+        deduped.append(item)
+
+    scored: list[tuple[int, int, dict]] = []
+    for item in deduped:
+        category = str(item.get("category", ""))
+        if category != "政策":
+            continue
+
+        source = str(item.get("source", ""))
+        weight = source_weight.get(source, 12)
+        base_score = 38 + weight // 2
+        news_copy = {
+            **item,
+            "score": max(int(item.get("score", 0) or 0), min(base_score, 70)),
+            "matched": item.get("matched") or ["本土政策"],
+            "source": source or "本土政策源",
+        }
+        scored.append((weight, int(news_copy["score"]), news_copy))
+
+    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    selected = [item[2] for item in scored[:top_n]]
+
+    if len(selected) < top_n:
+        for item in DEFAULT_NEWS:
+            if len(selected) >= top_n:
+                break
+            if item.get("category") != "政策":
+                continue
+            if any(str(item.get("title", "")).strip() == str(s.get("title", "")).strip() for s in selected):
+                continue
+            selected.append(
+                {
+                    **item,
+                    "score": 46,
+                    "matched": ["本土政策"],
+                    "source": "内置政策样本",
+                }
+            )
+
+    return selected[:top_n]
+
+
 def build_today_actions(boss: dict, matched_events: list[dict], matched_news: list[dict]) -> list[dict]:
     actions: list[dict] = []
     schedule = sorted(boss.get("today_schedule", []), key=lambda x: (priority_weight(x.get("priority", "低")), x.get("time", "99:99")))
@@ -2107,6 +2247,21 @@ if not matched_events and live_events:
 if not matched_news and all_news:
     matched_news = _fallback_news_candidates(selected_boss, all_news, top_n=4)
     live_warnings.append("热点严格匹配结果为空，已启用行业热点宽松推荐")
+
+if not matched_events:
+    guaranteed_events, full_city_online = _minimum_online_city_events(selected_boss, live_events, TODAY_EVENTS, top_n=2)
+    if guaranteed_events:
+        matched_events = guaranteed_events
+        if full_city_online:
+            live_warnings.append("已启用最小展示保障：固定展示2条同城线上活动")
+        else:
+            live_warnings.append("已启用最小展示保障：同城线上不足，已用全国线上活动补齐2条")
+
+if not matched_news:
+    guaranteed_news = _minimum_local_policy_news(all_news + live_news + DEFAULT_NEWS, top_n=2)
+    if guaranteed_news:
+        matched_news = guaranteed_news
+        live_warnings.append("已启用最小展示保障：固定展示2条本土政策热点")
 
 if live_warnings:
     warning_caption.caption("系统提示：" + "；".join(dict.fromkeys(live_warnings)))
