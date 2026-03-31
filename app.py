@@ -1623,6 +1623,87 @@ def priority_weight(level: str) -> int:
     return order.get(level, 3)
 
 
+def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4) -> list[dict]:
+    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
+    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
+    city = boss.get("city", "")
+
+    scored: list[dict] = []
+    for item in news_items:
+        title = str(item.get("title", ""))
+        category = str(item.get("category", ""))
+        title_lower = title.lower()
+        category_lower = category.lower()
+
+        if any(ig in title_lower or ig in category_lower for ig in ignore_keywords):
+            continue
+
+        score = 8
+        matched: list[str] = []
+
+        for kw in boss_keywords:
+            if kw and (kw in title_lower or kw in category_lower):
+                score += 14
+                matched.append(kw)
+
+        if city and city in title:
+            score += 8
+
+        # 政策/行业热点默认给基础分，避免长期空白
+        if category in {"政策", "金融", "AI科技", "电商", "外贸", "跨境电商", "制造业", "新能源", "法律科技"}:
+            score += 8
+
+        scored.append(
+            {
+                **item,
+                "score": min(68, score),
+                "matched": list(dict.fromkeys(matched))[:3] or [category or "行业热点"],
+            }
+        )
+
+    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return scored[:top_n]
+
+
+def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -> list[dict]:
+    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
+    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
+    city = boss.get("city", "")
+
+    scored: list[dict] = []
+    for event in events:
+        text = f"{event.get('title', '')} {event.get('description', '')}".lower()
+        if any(ig in text for ig in ignore_keywords):
+            continue
+
+        score = 10
+        matched_keywords: list[str] = []
+        for kw in boss_keywords:
+            if kw and (kw in text or any(kw in str(ek).lower() for ek in event.get("keywords", []))):
+                score += 12
+                matched_keywords.append(kw)
+
+        if city and city in str(event.get("location", "")):
+            score += 10
+        if event.get("format") == "线上":
+            score += 6
+        if event.get("value") == "高":
+            score += 6
+        if float(event.get("travel_hours", 9) or 9) <= MAX_TRAVEL_HOURS:
+            score += 8
+
+        scored.append(
+            {
+                **event,
+                "score": min(66, int(score)),
+                "matched_keywords": list(dict.fromkeys(matched_keywords))[:3] or ["同城/低成本可达"],
+            }
+        )
+
+    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return scored[:top_n]
+
+
 def build_today_actions(boss: dict, matched_events: list[dict], matched_news: list[dict]) -> list[dict]:
     actions: list[dict] = []
     schedule = sorted(boss.get("today_schedule", []), key=lambda x: (priority_weight(x.get("priority", "低")), x.get("time", "99:99")))
@@ -2018,6 +2099,18 @@ if refresh:
 all_news = live_news + extra_news
 matched_events = match_events_for_boss(selected_boss, live_events)
 matched_news = match_news_for_boss(selected_boss, all_news)
+
+if not matched_events and live_events:
+    matched_events = _fallback_event_candidates(selected_boss, live_events, top_n=3)
+    live_warnings.append("活动严格匹配结果为空，已启用同城/低出行成本宽松推荐")
+
+if not matched_news and all_news:
+    matched_news = _fallback_news_candidates(selected_boss, all_news, top_n=4)
+    live_warnings.append("热点严格匹配结果为空，已启用行业热点宽松推荐")
+
+if live_warnings:
+    warning_caption.caption("系统提示：" + "；".join(dict.fromkeys(live_warnings)))
+
 schedule = selected_boss.get("today_schedule", [])
 
 today_str = datetime.now().strftime("%Y年%m月%d日")

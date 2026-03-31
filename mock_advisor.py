@@ -5,6 +5,7 @@ AI商业参谋 - 模拟引擎（无需API，免费运行）
 """
 
 import random
+import re
 from datetime import datetime
 
 
@@ -99,11 +100,52 @@ MIROFISH_TEMPLATES = {
 }
 
 
+def _extract_terms(text: str) -> list[str]:
+    terms = re.findall(r"[A-Za-z]{2,}|[\u4e00-\u9fff]{2,}", (text or "").lower())
+    ignored = {"公司", "团队", "顾问", "老板", "方向", "行业", "服务", "业务"}
+    return [term for term in terms if term not in ignored]
+
+
+def _keyword_parts(keyword: str) -> list[str]:
+    kw = (keyword or "").lower().strip()
+    if len(kw) < 4:
+        return [kw] if kw else []
+    return list(dict.fromkeys([kw[:2], kw[-2:], kw[:3], kw[-3:]]))
+
+
+def _infer_news_category_preferences(boss: dict) -> set[str]:
+    text = " ".join([boss.get("industry", ""), boss.get("current_goal", ""), " ".join(boss.get("keywords", []))]).lower()
+    prefs: set[str] = set()
+
+    rules = {
+        "政策": ["政策", "补贴", "监管", "合规", "政府", "国办"],
+        "电商": ["电商", "抖音", "直播", "私域", "选款", "流量"],
+        "AI科技": ["ai", "人工智能", "算法", "大模型", "科技"],
+        "外贸": ["外贸", "出口", "进口", "跨境", "广交会", "东南亚"],
+        "跨境电商": ["跨境", "东南亚", "出海", "海外", "shopee", "lazada"],
+        "金融": ["金融", "融资", "信贷", "汇率", "银行", "资金"],
+        "餐饮": ["餐饮", "堂食", "外卖", "连锁", "预制菜"],
+        "法律科技": ["法律", "律所", "合规", "法务", "legaltech"],
+        "设计": ["设计", "ui", "ux", "用户体验", "创意"],
+        "制造业": ["制造", "工厂", "产能", "订单", "汽配", "建材", "工程"],
+        "新能源": ["新能源", "汽车", "电池", "光伏", "储能"],
+    }
+
+    for category, keywords in rules.items():
+        if any(keyword in text for keyword in keywords):
+            prefs.add(category)
+
+    return prefs
+
+
 def match_news_for_boss(boss: dict, news_items: list[dict]) -> list[dict]:
     """为老板匹配相关新闻，返回带评分的列表。"""
     scored = []
     boss_keywords = [kw.lower() for kw in boss["keywords"]]
     ignore_keywords = [kw.lower() for kw in boss["ignore_keywords"]]
+    industry_terms = _extract_terms(boss.get("industry", ""))
+    goal_terms = _extract_terms(boss.get("current_goal", ""))[:8]
+    category_preferences = _infer_news_category_preferences(boss)
 
     for news in news_items:
         title = news["title"].lower()
@@ -121,25 +163,37 @@ def match_news_for_boss(boss: dict, news_items: list[dict]) -> list[dict]:
             if kw in title or kw in category:
                 score += 20
                 matched_keywords.append(kw)
+            else:
+                parts = _keyword_parts(kw)
+                if any(part and (part in title or part in category) for part in parts):
+                    score += 8
+                    matched_keywords.append(kw)
+
+        # 类别偏好加分，避免“抓到了但全空白”
+        if news.get("category") in category_preferences:
+            score += 12
 
         # 行业匹配加分
-        industry_words = boss["industry"].lower().split()
-        for word in industry_words:
+        for word in industry_terms:
             if len(word) > 1 and word in title:
                 score += 15
                 break
 
         # 目标相关加分
-        goal_words = boss["current_goal"].lower()
-        for kw in boss_keywords[:3]:  # 前3个关键词权重更高
+        goal_words = boss.get("current_goal", "").lower()
+        for kw in boss_keywords[:3]:
             if kw in goal_words and kw in title:
                 score += 10
+        for term in goal_terms:
+            if term in title:
+                score += 6
+                break
 
-        if score >= 15:  # 最低门槛
+        if score >= 10:
             scored.append({
                 **news,
                 "score": min(score, 98),
-                "matched": matched_keywords,
+                "matched": list(dict.fromkeys(matched_keywords))[:4],
             })
 
     # 按分数排序，取前5条
@@ -198,6 +252,8 @@ def match_events_for_boss(boss: dict, events: list[dict]) -> list[dict]:
     matched = []
     boss_keywords = [kw.lower() for kw in boss["keywords"]]
     ignore_keywords = [kw.lower() for kw in boss["ignore_keywords"]]
+    industry_terms = _extract_terms(boss.get("industry", ""))
+    boss_city = boss.get("city", "")
 
     for event in events:
         title = (event["title"] + " " + event["description"]).lower()
@@ -213,19 +269,32 @@ def match_events_for_boss(boss: dict, events: list[dict]) -> list[dict]:
             if kw in title or any(kw in ek.lower() for ek in event["keywords"]):
                 score += 20
                 matched_keywords.append(kw)
+            else:
+                parts = _keyword_parts(kw)
+                if any(part and (part in title or any(part in ek.lower() for ek in event.get("keywords", []))) for part in parts):
+                    score += 8
+                    matched_keywords.append(kw)
 
         # 行业匹配
-        industry = boss["industry"].lower()
+        industry = boss.get("industry", "").lower()
         for ind in event.get("target_industries", []):
-            if any(word in ind.lower() for word in industry.split()):
-                score += 25
+            ind_lower = ind.lower()
+            if any(word in ind_lower or ind_lower in word for word in industry_terms):
+                score += 18
                 break
 
-        if score >= 20:
+        if boss_city and boss_city in event.get("location", ""):
+            score += 10
+        if event.get("format") == "线上":
+            score += 4
+        if event.get("value") == "高":
+            score += 4
+
+        if score >= 12:
             matched.append({
                 **event,
                 "score": min(score, 99),
-                "matched_keywords": matched_keywords[:3],
+                "matched_keywords": list(dict.fromkeys(matched_keywords))[:3],
             })
 
     matched.sort(key=lambda x: x["score"], reverse=True)
