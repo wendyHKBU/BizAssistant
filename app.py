@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 import html
+import os
 import re
 import time
 import textwrap
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin
 import xml.etree.ElementTree as ET
 
 import requests
@@ -58,7 +59,15 @@ DEFAULT_NEWS = [
 ]
 
 
-NEWS_RSS_SOURCES = [
+LOCAL_NEWS_RSS_SOURCES = [
+    ("中国政府网政策", "https://www.gov.cn/zhengce/", "政策"),
+    ("百度财经", "https://news.baidu.com/n?cmd=4&class=finannews&tn=rss", "金融"),
+    ("百度民生", "https://news.baidu.com/n?cmd=4&class=civilnews&tn=rss", "政策"),
+    ("36氪", "https://www.36kr.com/feed", "AI科技"),
+    ("钛媒体", "https://www.tmtpost.com/rss.xml", "AI科技"),
+]
+
+GOOGLE_NEWS_QUERIES = [
     ("中小企业 政策", "政策"),
     ("抖音 电商 中小商家", "电商"),
     ("人民币 汇率 外贸", "外汇"),
@@ -71,13 +80,24 @@ NEWS_RSS_SOURCES = [
     ("新能源汽车 配件", "新能源"),
 ]
 
-EVENT_RSS_QUERIES = [
-    "创业 论坛 峰会 报名",
-    "企业家 沙龙 路演 活动",
-    "跨境电商 展会 对接会",
-    "AI 产业 论坛 活动",
-    "直播电商 训练营 活动",
+LOCAL_EVENT_KEYWORDS = [
+    "创业峰会",
+    "跨境电商",
+    "AI 论坛",
+    "产业展会",
+    "投融资路演",
 ]
+
+EVENT_API_QUERIES = [
+    "business summit",
+    "entrepreneur forum",
+    "cross-border ecommerce",
+    "ai conference",
+    "marketing growth",
+]
+
+EVENTBRITE_SEARCH_URL = "https://www.eventbriteapi.com/v3/events/search/"
+TICKETMASTER_SEARCH_URL = "https://app.ticketmaster.com/discovery/v2/events.json"
 
 NEWS_CATEGORY_RULES = {
     "政策": ["政策", "补贴", "实施方案", "指导意见", "工信部", "国务院"],
@@ -153,6 +173,73 @@ def _parse_rss_items(url: str, max_items: int = 18) -> list[dict]:
     return items
 
 
+def _safe_get_text(url: str, timeout: int = 14) -> str:
+    try:
+        response = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 BizAdvisor/1.0"})
+        response.raise_for_status()
+        response.encoding = response.apparent_encoding or response.encoding
+        return response.text
+    except Exception:
+        return ""
+
+
+def _clean_html_text(raw: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", raw or "")
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_gov_policy_items(url: str, max_items: int = 14) -> list[dict]:
+    html_text = _safe_get_text(url)
+    if not html_text:
+        return []
+
+    pairs = re.findall(r'<a[^>]+href="([^"]*content_\d+\.htm)"[^>]*>(.*?)</a>', html_text, flags=re.I | re.S)
+    if not pairs:
+        return []
+
+    ignored_titles = {
+        "国务院部门网站",
+        "地方政府网站",
+        "驻港澳机构网站",
+        "驻外机构",
+        "关于本网",
+        "网站声明",
+        "联系我们",
+        "中国政府网微博、微信",
+        "微信",
+    }
+
+    policy_items: list[dict] = []
+    seen_urls = set()
+    for href, title_html in pairs:
+        title = _clean_html_text(title_html)
+        if not title or title in ignored_titles or len(title) < 8:
+            continue
+
+        full_url = urljoin(url, href)
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
+
+        if "/zhengce/" not in full_url:
+            continue
+
+        policy_items.append(
+            {
+                "title": title,
+                "link": full_url,
+                "description": "中国政府网政策动态",
+                "published": "",
+            }
+        )
+
+        if len(policy_items) >= max_items:
+            break
+
+    return policy_items
+
+
 def _infer_news_category(title: str, description: str, fallback: str) -> str:
     text = f"{title} {description}".lower()
     for category, keywords in NEWS_CATEGORY_RULES.items():
@@ -183,31 +270,67 @@ def _detect_event_profile(title: str, description: str) -> tuple[list[str], list
     return uniq_keywords, uniq_industries
 
 
-def _format_event_time(pub_date: str) -> str:
-    if not pub_date:
+def _format_event_start(raw_time: str) -> str:
+    if not raw_time:
         return "近期"
+
+    candidate = raw_time.strip()
     try:
-        dt = parsedate_to_datetime(pub_date)
-        return dt.strftime("%m-%d 发布")
+        dt = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        return dt.strftime("%m-%d %H:%M")
     except Exception:
-        return "近期"
+        pass
+
+    try:
+        dt = parsedate_to_datetime(candidate)
+        return dt.strftime("%m-%d %H:%M")
+    except Exception:
+        pass
+
+    if "T" in candidate:
+        return candidate.replace("T", " ")[:16]
+    return candidate[:16] if candidate else "近期"
 
 
-def _infer_event_location(title: str, description: str, event_format: str) -> str:
+def _normalize_event_text(text: str, max_len: int = 150) -> str:
+    clean = re.sub(r"\s+", " ", (text or "").strip())
+    if not clean:
+        return ""
+    if len(clean) <= max_len:
+        return clean
+    return clean[: max_len - 3].rstrip() + "..."
+
+
+def _safe_api_get_json(url: str, *, params: dict | None = None, headers: dict | None = None) -> dict | None:
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=14,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
+def _infer_event_location(title: str, description: str, event_format: str, fallback_label: str) -> str:
     text = f"{title} {description}"
     for city in CITY_MARKERS:
         if city in text:
             if city == "线上":
                 return "线上活动"
-            return f"{city}（实时抓取）"
-    return "线上活动" if event_format == "线上" else "全国（实时抓取）"
+            return city
+    return "线上活动" if event_format == "线上" else fallback_label
 
 
-def _build_live_news(max_items: int = 24) -> list[dict]:
+def _build_google_news_fallback(max_items: int = 16) -> list[dict]:
     seen_titles = set()
     news: list[dict] = []
 
-    for query, fallback_category in NEWS_RSS_SOURCES:
+    for query, fallback_category in GOOGLE_NEWS_QUERIES:
         url = _google_rss_url(query)
         for item in _parse_rss_items(url, max_items=12):
             normalized_title = item["title"].strip()
@@ -221,7 +344,7 @@ def _build_live_news(max_items: int = 24) -> list[dict]:
                     "id": f"R{len(news) + 1:02d}",
                     "title": item["title"],
                     "category": category,
-                    "source": "Google News RSS",
+                    "source": "Google News RSS（补充）",
                     "published": item["published"],
                     "url": item["link"],
                 }
@@ -232,51 +355,383 @@ def _build_live_news(max_items: int = 24) -> list[dict]:
     return news
 
 
-def _build_live_events(max_items: int = 12) -> list[dict]:
+def _build_local_news(max_items: int = 24) -> list[dict]:
     seen_titles = set()
-    events: list[dict] = []
+    news: list[dict] = []
 
-    for query in EVENT_RSS_QUERIES:
-        url = _google_rss_url(query)
-        for item in _parse_rss_items(url, max_items=14):
-            title = item["title"]
-            description = item["description"]
-            text = f"{title} {description}"
-            if not any(marker in text for marker in EVENT_MARKERS):
-                continue
+    for source_name, source_url, fallback_category in LOCAL_NEWS_RSS_SOURCES:
+        if source_name == "中国政府网政策":
+            items = _parse_gov_policy_items(source_url, max_items=14)
+        else:
+            items = _parse_rss_items(source_url, max_items=16)
 
-            normalized_title = title.strip()
+        for item in items:
+            normalized_title = item["title"].strip()
             if not normalized_title or normalized_title in seen_titles:
                 continue
             seen_titles.add(normalized_title)
 
-            event_format = "线上" if any(w in text for w in ["线上", "直播", "webinar", "在线", "腾讯会议", "zoom"]) else "线下"
-            location = _infer_event_location(title, description, event_format)
-            keywords, industries = _detect_event_profile(title, description)
-            high_value = any(w in text for w in ["峰会", "论坛", "对接会", "路演", "展会"])
+            category = _infer_news_category(item["title"], item["description"], fallback_category)
+            if source_name == "中国政府网政策":
+                category = "政策"
 
-            events.append(
+            news.append(
                 {
-                    "id": f"rev{len(events) + 1:02d}",
-                    "title": title,
-                    "time": _format_event_time(item.get("published", "")),
-                    "location": location,
-                    "format": event_format,
-                    "source": "news",
-                    "source_detail": "Google News 活动源抓取",
-                    "keywords": keywords,
-                    "target_industries": industries,
-                    "description": description[:120] if description else "实时活动线索，建议点击原文确认细节。",
-                    "registration_deadline": "请点击原文查看最新报名信息",
-                    "value": "高" if high_value else "中",
+                    "id": f"R{len(news) + 1:02d}",
+                    "title": item["title"],
+                    "category": category,
+                    "source": source_name,
+                    "published": item.get("published", ""),
                     "url": item.get("link", ""),
                 }
             )
+            if len(news) >= max_items:
+                return news
 
-            if len(events) >= max_items:
-                return events
+    return news
+
+
+def _build_live_news(max_items: int = 24) -> list[dict]:
+    local_news = _build_local_news(max_items=max_items)
+    if len(local_news) >= max_items:
+        return local_news[:max_items]
+
+    fallback_news = _build_google_news_fallback(max_items=max_items)
+    if not local_news:
+        return fallback_news[:max_items]
+
+    seen_titles = {item["title"].strip() for item in local_news}
+    merged = list(local_news)
+
+    for item in fallback_news:
+        title = item["title"].strip()
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+        merged.append(item)
+        if len(merged) >= max_items:
+            break
+
+    for i, item in enumerate(merged, 1):
+        item["id"] = f"R{i:02d}"
+    return merged
+
+
+def _event_from_eventbrite(raw_event: dict) -> dict | None:
+    title = _normalize_event_text((raw_event.get("name") or {}).get("text", ""), max_len=90)
+    if not title:
+        return None
+
+    summary = _normalize_event_text(raw_event.get("summary", ""), max_len=200)
+    long_description = _normalize_event_text(((raw_event.get("description") or {}).get("text", "")), max_len=200)
+    description = long_description or summary or "活动详情请点击官方页面查看。"
+    event_format = "线上" if raw_event.get("online_event") else "线下"
+
+    venue = raw_event.get("venue") or {}
+    venue_address = _normalize_event_text((venue.get("address") or {}).get("localized_address_display", ""), max_len=40)
+    location = _infer_event_location(title, description, event_format, venue_address or "线下活动（详见活动页）")
+
+    start_info = raw_event.get("start") or {}
+    end_info = raw_event.get("end") or {}
+    start_at = start_info.get("local") or start_info.get("utc") or ""
+    deadline = end_info.get("local") or end_info.get("utc") or ""
+
+    keywords, industries = _detect_event_profile(title, description)
+    text = f"{title} {description}".lower()
+    high_value = any(marker in text for marker in EVENT_MARKERS) or any(
+        marker in text for marker in ["summit", "conference", "forum", "expo", "roadshow"]
+    )
+
+    return {
+        "title": title,
+        "time": _format_event_start(start_at),
+        "location": location,
+        "format": event_format,
+        "source": "api",
+        "source_detail": "Eventbrite API",
+        "keywords": keywords,
+        "target_industries": industries,
+        "description": description,
+        "registration_deadline": _format_event_start(deadline) if deadline else "详见活动页",
+        "value": "高" if high_value else "中",
+        "url": raw_event.get("url", ""),
+    }
+
+
+def _event_from_ticketmaster(raw_event: dict) -> dict | None:
+    title = _normalize_event_text(raw_event.get("name", ""), max_len=90)
+    if not title:
+        return None
+
+    info = _normalize_event_text(raw_event.get("info", ""), max_len=200)
+    note = _normalize_event_text(raw_event.get("pleaseNote", ""), max_len=200)
+    description = info or note or "活动详情请点击官方页面查看。"
+    text = f"{title} {description}".lower()
+    event_format = "线上" if any(w in text for w in ["online", "virtual", "webinar", "livestream", "线上", "直播"]) else "线下"
+
+    venue = ((raw_event.get("_embedded") or {}).get("venues") or [{}])[0]
+    city = _normalize_event_text((venue.get("city") or {}).get("name", ""), max_len=24)
+    venue_name = _normalize_event_text(venue.get("name", ""), max_len=40)
+    country = _normalize_event_text((venue.get("country") or {}).get("name", ""), max_len=24)
+    fallback_location = " · ".join(part for part in [city, venue_name, country] if part) or "线下活动（详见活动页）"
+    location = _infer_event_location(title, description, event_format, fallback_location)
+
+    start_info = (raw_event.get("dates") or {}).get("start") or {}
+    start_at = start_info.get("dateTime") or ""
+    if not start_at:
+        local_date = start_info.get("localDate") or ""
+        local_time = start_info.get("localTime") or ""
+        if local_date and local_time:
+            start_at = f"{local_date}T{local_time}"
+        else:
+            start_at = local_date
+
+    keywords, industries = _detect_event_profile(title, description)
+    high_value = any(marker in text for marker in EVENT_MARKERS) or any(
+        marker in text for marker in ["summit", "conference", "forum", "expo", "roadshow"]
+    )
+
+    return {
+        "title": title,
+        "time": _format_event_start(start_at),
+        "location": location,
+        "format": event_format,
+        "source": "api",
+        "source_detail": "Ticketmaster Discovery API",
+        "keywords": keywords,
+        "target_industries": industries,
+        "description": description,
+        "registration_deadline": "详见活动页",
+        "value": "高" if high_value else "中",
+        "url": raw_event.get("url", ""),
+    }
+
+
+def _huodongxing_search_url(keyword: str) -> str:
+    return f"https://www.huodongxing.com/search?kw={quote_plus(keyword)}"
+
+
+def _extract_huodongxing_card_events(html_text: str, keyword: str) -> list[dict]:
+    pattern = re.compile(
+        r'<div class="search-tab-content-item-mesh".*?'
+        r'href="(?P<href>/event/[^"]+)"[^>]*>.*?'
+        r'<p class="activityTitle">(?P<title>.*?)</p>.*?'
+        r'<div class="item-dress flex">\s*<p>(?P<time>.*?)</p>\s*<span>.*?'
+        r'<span class="item-dress-pp">(?P<location>.*?)</span>',
+        flags=re.I | re.S,
+    )
+
+    events: list[dict] = []
+    for match in pattern.finditer(html_text):
+        href = html.unescape(match.group("href") or "").strip()
+        title = _clean_html_text(match.group("title") or "")
+        event_time = _clean_html_text(match.group("time") or "")
+        location = _clean_html_text(match.group("location") or "")
+
+        if not href or not title:
+            continue
+
+        event_url = urljoin("https://www.huodongxing.com", href.split("?")[0])
+        description = f"来自活动行本土活动源，检索关键词：{keyword}。"
+        event_format = "线上" if any(w in f"{title} {location}" for w in ["线上", "直播", "webinar", "在线"]) else "线下"
+        normalized_location = location or ("线上活动" if event_format == "线上" else "全国（以活动页为准）")
+
+        keywords, industries = _detect_event_profile(title, description)
+        text = f"{title} {description}".lower()
+        high_value = any(marker in text for marker in EVENT_MARKERS)
+
+        events.append(
+            {
+                "title": title,
+                "time": event_time or "近期",
+                "location": normalized_location,
+                "format": event_format,
+                "source": "local",
+                "source_detail": "活动行（本土活动平台）",
+                "keywords": keywords,
+                "target_industries": industries,
+                "description": description,
+                "registration_deadline": "详见活动页",
+                "value": "高" if high_value else "中",
+                "url": event_url,
+            }
+        )
 
     return events
+
+
+def _extract_huodongxing_quick_events(html_text: str, keyword: str) -> list[dict]:
+    pattern = re.compile(
+        r'<a class="late-publish-title"[^>]+href="(?P<href>/event/[^"]+)"[^>]*>(?P<title>.*?)</a>',
+        flags=re.I | re.S,
+    )
+
+    events: list[dict] = []
+    for match in pattern.finditer(html_text):
+        href = html.unescape(match.group("href") or "").strip()
+        title = _clean_html_text(match.group("title") or "")
+        if not href or not title:
+            continue
+
+        event_url = urljoin("https://www.huodongxing.com", href.split("?")[0])
+        description = f"来自活动行本土活动源，检索关键词：{keyword}。"
+        event_format = "线上" if any(w in title for w in ["线上", "直播", "webinar", "在线"]) else "线下"
+        keywords, industries = _detect_event_profile(title, description)
+        text = f"{title} {description}".lower()
+        high_value = any(marker in text for marker in EVENT_MARKERS)
+
+        events.append(
+            {
+                "title": title,
+                "time": "近期",
+                "location": "全国（以活动页为准）",
+                "format": event_format,
+                "source": "local",
+                "source_detail": "活动行（本土活动平台）",
+                "keywords": keywords,
+                "target_industries": industries,
+                "description": description,
+                "registration_deadline": "详见活动页",
+                "value": "高" if high_value else "中",
+                "url": event_url,
+            }
+        )
+
+    return events
+
+
+def _fetch_huodongxing_events(max_items: int = 18) -> list[dict]:
+    collected: list[dict] = []
+    seen_urls = set()
+
+    for keyword in LOCAL_EVENT_KEYWORDS:
+        url = _huodongxing_search_url(keyword)
+        html_text = _safe_get_text(url, timeout=16)
+        if not html_text:
+            continue
+
+        candidates = _extract_huodongxing_card_events(html_text, keyword)
+        if not candidates:
+            candidates = _extract_huodongxing_quick_events(html_text, keyword)
+
+        for event in candidates:
+            event_url = event.get("url", "")
+            if not event_url or event_url in seen_urls:
+                continue
+            seen_urls.add(event_url)
+            collected.append(event)
+            if len(collected) >= max_items:
+                return collected
+
+    return collected
+
+
+def _fetch_eventbrite_events(api_token: str) -> list[dict]:
+    collected: list[dict] = []
+    headers = {"Authorization": f"Bearer {api_token}"}
+
+    for query in EVENT_API_QUERIES:
+        payload = _safe_api_get_json(
+            EVENTBRITE_SEARCH_URL,
+            params={
+                "q": query,
+                "sort_by": "date",
+                "page_size": 10,
+                "expand": "venue",
+            },
+            headers=headers,
+        )
+        if not payload:
+            continue
+
+        for raw_event in payload.get("events", []):
+            status = (raw_event.get("status") or "").lower()
+            if status and status not in {"live", "started"}:
+                continue
+
+            event = _event_from_eventbrite(raw_event)
+            if event:
+                collected.append(event)
+
+    return collected
+
+
+def _fetch_ticketmaster_events(api_key: str) -> list[dict]:
+    collected: list[dict] = []
+
+    for query in EVENT_API_QUERIES:
+        payload = _safe_api_get_json(
+            TICKETMASTER_SEARCH_URL,
+            params={
+                "apikey": api_key,
+                "keyword": query,
+                "size": 10,
+                "sort": "date,asc",
+                "locale": "*",
+            },
+        )
+        if not payload:
+            continue
+
+        event_items = (payload.get("_embedded") or {}).get("events") or []
+        for raw_event in event_items:
+            event = _event_from_ticketmaster(raw_event)
+            if event:
+                collected.append(event)
+
+    return collected
+
+
+def _dedupe_live_events(events: list[dict], max_items: int) -> list[dict]:
+    seen_titles = set()
+    deduped: list[dict] = []
+
+    for event in events:
+        title_key = re.sub(r"\s+", " ", (event.get("title", "").lower())).strip()
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        deduped.append(event)
+        if len(deduped) >= max_items:
+            break
+
+    for i, event in enumerate(deduped, 1):
+        event["id"] = f"rev{i:02d}"
+    return deduped
+
+
+def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
+    warnings: list[str] = []
+    all_events: list[dict] = []
+
+    local_events = _fetch_huodongxing_events(max_items=max_items * 2)
+    if local_events:
+        all_events.extend(local_events)
+    else:
+        warnings.append("本土活动源暂不可用")
+
+    eventbrite_token = os.getenv("EVENTBRITE_API_TOKEN", "").strip()
+    ticketmaster_key = os.getenv("TICKETMASTER_API_KEY", "").strip()
+
+    if eventbrite_token:
+        eventbrite_events = _fetch_eventbrite_events(eventbrite_token)
+        if eventbrite_events:
+            all_events.extend(eventbrite_events)
+        else:
+            warnings.append("Eventbrite API 暂未返回可用活动")
+
+    if ticketmaster_key:
+        ticketmaster_events = _fetch_ticketmaster_events(ticketmaster_key)
+        if ticketmaster_events:
+            all_events.extend(ticketmaster_events)
+        else:
+            warnings.append("Ticketmaster API 暂未返回可用活动")
+
+    live_events = _dedupe_live_events(all_events, max_items=max_items)
+    if not live_events:
+        warnings.append("活动源暂不可用")
+
+    return live_events, warnings
 
 
 @st.cache_data(show_spinner=False)
@@ -289,10 +744,12 @@ def get_realtime_feeds(refresh_bucket: int) -> tuple[list[dict], list[dict], str
         live_news = DEFAULT_NEWS.copy()
         warnings.append("新闻源暂不可用，已自动回退到内置热点")
 
-    live_events = _build_live_events(max_items=12)
+    live_events, event_warnings = _build_live_events(max_items=12)
+    if event_warnings:
+        warnings.extend(event_warnings)
     if not live_events:
         live_events = TODAY_EVENTS.copy()
-        warnings.append("活动源暂不可用，已自动回退到内置活动池")
+        warnings.append("活动 API 暂不可用，已自动回退到内置活动池")
 
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return live_news, live_events, updated_at, warnings
@@ -1148,7 +1605,7 @@ if refresh:
 
 live_news, live_events, live_updated_at, live_warnings = get_realtime_feeds(refresh_bucket)
 
-mode_caption.caption(f"当前：实时联网模式（每 {refresh_minutes} 分钟自动刷新）")
+mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动，国际 API 可选补充；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
 update_caption.caption(f"更新时间：{live_updated_at}")
 if live_warnings:

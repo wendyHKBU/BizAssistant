@@ -17,6 +17,18 @@
 说明：
 - 本项目已配置好容器启动命令，无需手改。
 - 如后续启用真实AI模式，请在 Render 的 Environment Variables 添加 `ANTHROPIC_API_KEY`。
+- 新闻与政策默认使用本土源（中国政府网政策页 + 百度新闻 RSS + 36氪/钛媒体 RSS），无需额外 key。
+- 活动默认使用本土活动源（活动行公开活动页），无需额外 key。
+- 以下两个国际活动 API key 现在是“可选补充源”（不配置也能跑）：
+- `EVENTBRITE_API_TOKEN`（Eventbrite Personal OAuth token）
+- `TICKETMASTER_API_KEY`（Ticketmaster Discovery API key）
+- 若本土源与可选 API 均暂不可用，系统会自动回退到内置活动池并在侧边栏提示。
+
+Render 环境变量填写示例（可选）：
+
+`EVENTBRITE_API_TOKEN=xxxxxxxx`
+
+`TICKETMASTER_API_KEY=xxxxxxxx`
 
 ## 方案B：Streamlit Community Cloud
 
