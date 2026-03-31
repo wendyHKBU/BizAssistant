@@ -726,8 +726,7 @@ def render_timeline(actions: list[dict]) -> None:
 
 
 def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> None:
-    st.markdown("<div class='section-title'>2. 值得做的决策拆解</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-desc'>先回答“什么值得做”，再通过热点信号回答“为什么值得做”。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>2. 值得做</div>", unsafe_allow_html=True)
 
     has_events = bool(matched_events)
     has_news = bool(matched_news)
