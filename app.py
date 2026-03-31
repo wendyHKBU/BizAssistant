@@ -130,6 +130,24 @@ HUODONGJIA_EVENT_KEYWORDS = [
     "培训",
 ]
 
+EVENT_DISCOVERY_PLATFORMS = [
+    {"name": "百格活动", "domain": "bagevent.com", "url": "https://www.bagevent.com"},
+    {"name": "会腾软件", "domain": "huitengsoft.com", "url": "https://www.huitengsoft.com"},
+    {"name": "互动吧", "domain": "hudongba.com", "url": "https://www.hudongba.com"},
+    {"name": "活动行", "domain": "huodongxing.com", "url": "https://www.huodongxing.com"},
+    {"name": "31会议", "domain": "31huiyi.com", "url": "https://www.31huiyi.com"},
+    {"name": "快会务", "domain": "kuaihuiwu.com", "url": "https://www.kuaihuiwu.com"},
+    {"name": "会会", "domain": "huihui521.com", "url": "https://www.huihui521.com"},
+    {"name": "活动家", "domain": "huodongjia.com", "url": "https://www.huodongjia.com"},
+]
+
+WECHAT_EVENT_CHANNEL_TOPICS = [
+    ("地方媒体公众号", "地方媒体 活动 论坛 展会"),
+    ("校园公众号", "校园 讲座 创业 大赛 活动"),
+    ("活动平台联动号", "活动平台 联动 会务 通知"),
+    ("会展中心公众号", "会展中心 排期 展会 论坛"),
+]
+
 EVENT_API_QUERIES = [
     "business summit",
     "entrepreneur forum",
@@ -1313,6 +1331,81 @@ def _is_mainland_event(event: dict) -> bool:
     return not any(marker in text for marker in NON_MAINLAND_LOCATION_MARKERS)
 
 
+def _build_baidu_site_search_url(domain: str, keyword: str, city_hint: str = "") -> str:
+    query = " ".join(part for part in [f"site:{domain}", city_hint, keyword, "活动"] if part)
+    return f"https://www.baidu.com/s?wd={quote_plus(query)}"
+
+
+def _build_wechat_search_url(topic_query: str, city_hint: str = "") -> str:
+    query = " ".join(part for part in [city_hint, topic_query] if part)
+    return f"https://weixin.sogou.com/weixin?type=2&query={quote_plus(query)}"
+
+
+def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
+    entries: list[dict] = []
+    query_keywords = list(dict.fromkeys(HUODONGJIA_EVENT_KEYWORDS + ["会展", "路演", "沙龙"]))
+
+    for platform in EVENT_DISCOVERY_PLATFORMS:
+        for keyword in query_keywords[:2]:
+            title = f"{platform['name']}商机入口：{keyword}"
+            description = (
+                f"来自{platform['name']}平台检索入口，可按关键词快速发现商业活动。"
+                f"来源域名：{platform['domain']}。"
+            )
+            keywords, industries = _detect_event_profile(title, description)
+            entries.append(
+                {
+                    "title": title,
+                    "time": "持续更新",
+                    "location": "全国（平台检索）",
+                    "format": "线上",
+                    "source": "portal",
+                    "source_detail": f"{platform['name']}（活动信息获取平台）",
+                    "keywords": keywords,
+                    "target_industries": industries,
+                    "description": description,
+                    "registration_deadline": "详见平台页",
+                    "value": "中",
+                    "url": _build_baidu_site_search_url(platform["domain"], keyword, city_hint=""),
+                }
+            )
+            if len(entries) >= max_items:
+                return entries
+
+    return entries
+
+
+def _fetch_wechat_channel_events(max_items: int = 4) -> list[dict]:
+    entries: list[dict] = []
+    for channel_name, query in WECHAT_EVENT_CHANNEL_TOPICS:
+        title = f"微信公众号线索：{channel_name}"
+        description = (
+            "公众号活动信息受平台授权与反爬策略限制，不做直接抓取；"
+            "已提供检索入口用于发现本地会展/论坛/校园活动。"
+        )
+        keywords, industries = _detect_event_profile(title, description)
+        entries.append(
+            {
+                "title": title,
+                "time": "持续更新",
+                "location": "本地/线上",
+                "format": "线上",
+                "source": "portal",
+                "source_detail": "微信公众号活动线索入口",
+                "keywords": keywords,
+                "target_industries": industries,
+                "description": description,
+                "registration_deadline": "详见检索结果",
+                "value": "中",
+                "url": _build_wechat_search_url(query),
+            }
+        )
+        if len(entries) >= max_items:
+            break
+
+    return entries
+
+
 def _fetch_huodongxing_events(max_items: int = 18) -> list[dict]:
     collected: list[dict] = []
     seen_urls = set()
@@ -1446,6 +1539,18 @@ def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
             all_events.extend(ticketmaster_events)
         else:
             warnings.append("Ticketmaster API 暂未返回可用活动")
+
+    current_live = _dedupe_live_events(all_events, max_items=max_items)
+    if len(current_live) < max_items:
+        shortage = max_items - len(current_live)
+        portal_events = _fetch_platform_portal_events(max_items=min(12, max(4, shortage * 2)))
+        wechat_events = _fetch_wechat_channel_events(max_items=min(6, max(2, shortage)))
+        if portal_events:
+            all_events.extend(portal_events)
+        if wechat_events:
+            all_events.extend(wechat_events)
+        if portal_events or wechat_events:
+            warnings.append("真实活动不足，已补充活动信息获取平台与公众号线索入口")
 
     live_events = _dedupe_live_events(all_events, max_items=max_items)
     if not live_events:
