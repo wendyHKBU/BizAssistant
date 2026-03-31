@@ -2139,48 +2139,172 @@ def _infer_boss_event_preferences(boss: dict) -> set[str]:
     return prefs
 
 
-def _news_relevance_tier(boss: dict, item: dict) -> int:
+def _build_boss_profile_terms(boss: dict) -> list[str]:
+    raw_terms: list[str] = []
+    raw_terms.extend(_extract_profile_terms(str(boss.get("industry", ""))))
+    raw_terms.extend(_extract_profile_terms(str(boss.get("current_goal", ""))))
+    for kw in boss.get("keywords", []):
+        raw_terms.extend(_extract_profile_terms(str(kw)))
+
+    deduped: list[str] = []
+    seen = set()
+    for term in raw_terms:
+        if len(term) < 2:
+            continue
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(term)
+    return deduped
+
+
+def _match_profile_terms(text: str, terms: list[str], limit: int = 6) -> list[str]:
+    hits: list[str] = []
+    seen = set()
+    for term in terms:
+        if not term or term in seen:
+            continue
+        if term in text:
+            seen.add(term)
+            hits.append(term)
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _news_relevance_score(boss: dict, item: dict) -> tuple[int, list[str]]:
     ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
     boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
+    profile_terms = _build_boss_profile_terms(boss)
     news_prefs = _infer_boss_news_preferences(boss)
+    city = _canonical_city_name(str(boss.get("city", "")))
 
     title = str(item.get("title", ""))
     category = str(item.get("category", ""))
-    text = f"{title} {category}".lower()
+    description = str(item.get("description", ""))
+    source = str(item.get("source", ""))
+    text = f"{title} {category} {description} {source}".lower()
+
     if any(ig and ig in text for ig in ignore_keywords):
+        return -1, []
+
+    keyword_hits = _match_profile_terms(text, boss_keywords, limit=4)
+    term_hits = _match_profile_terms(text, profile_terms, limit=6)
+    extra_term_hits = [term for term in term_hits if term not in keyword_hits]
+
+    score = 0
+    score += len(keyword_hits) * 24
+    score += len(extra_term_hits) * 9
+
+    if category in news_prefs:
+        score += 22
+    if category == "政策":
+        score += 10
+    if city and city in text:
+        score += 10
+    if any(marker in source for marker in ["中国政府网", "百度民生", "新华社", "人民网"]):
+        score += 8
+
+    unrelated_hits = 0
+    for cat, markers in NEWS_CATEGORY_RULES.items():
+        if cat == category or cat in news_prefs:
+            continue
+        if any(str(marker).lower() in text for marker in markers[:4]):
+            unrelated_hits += 1
+    score -= min(18, unrelated_hits * 6)
+
+    if not keyword_hits and not extra_term_hits and category not in news_prefs:
+        score -= 12
+
+    score = max(0, min(96, score))
+    matched = list(dict.fromkeys(keyword_hits + extra_term_hits))[:3]
+    if category in news_prefs and category and category not in matched:
+        matched.append(category)
+
+    return score, matched[:3]
+
+
+def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
+    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
+    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
+    profile_terms = _build_boss_profile_terms(boss)
+    event_prefs = _infer_boss_event_preferences(boss)
+    city = _canonical_city_name(str(boss.get("city", "")))
+
+    event_keywords = [str(kw).lower() for kw in event.get("keywords", [])]
+    event_industries = [str(ind).lower() for ind in event.get("target_industries", [])]
+    text = (
+        f"{event.get('title', '')} {event.get('description', '')} {event.get('location', '')} "
+        f"{' '.join(event_keywords)} {' '.join(event_industries)}"
+    ).lower()
+
+    if any(ig and ig in text for ig in ignore_keywords):
+        return -1, []
+
+    keyword_hits = _match_profile_terms(text, boss_keywords, limit=4)
+    term_hits = _match_profile_terms(text, profile_terms, limit=6)
+    extra_term_hits = [term for term in term_hits if term not in keyword_hits]
+
+    industry_hits = 0
+    for pref in event_prefs:
+        if any(pref in ind or ind in pref for ind in event_industries):
+            industry_hits += 1
+
+    score = 0
+    score += min(36, industry_hits * 24)
+    score += len(keyword_hits) * 18
+    score += len(extra_term_hits) * 8
+
+    location_text = f"{event.get('title', '')} {event.get('location', '')}"
+    if city and city in location_text:
+        score += 10
+    if _is_online_event(event):
+        score += 4
+    if float(event.get("travel_hours", 9) or 9) <= MAX_TRAVEL_HOURS:
+        score += 8
+    if event.get("value") == "高":
+        score += 6
+    if event.get("source") == "portal":
+        score -= 4
+
+    unrelated_hits = 0
+    for industry_name, markers in EVENT_INDUSTRY_RULES.items():
+        industry_key = industry_name.lower()
+        if industry_key in event_prefs:
+            continue
+        if any(str(marker).lower() in text for marker in markers[:4]):
+            unrelated_hits += 1
+    score -= min(16, unrelated_hits * 4)
+
+    if event_industries and industry_hits == 0 and not keyword_hits:
+        score -= 10
+
+    score = max(0, min(98, score))
+    matched = list(dict.fromkeys(keyword_hits + extra_term_hits))[:3]
+    if not matched and event_industries:
+        matched = [event_industries[0][:8]]
+
+    return score, matched[:3]
+
+
+def _news_relevance_tier(boss: dict, item: dict) -> int:
+    score, _ = _news_relevance_score(boss, item)
+    if score < 0:
         return -1
-
-    keyword_hits = sum(1 for kw in boss_keywords if kw and kw in text)
-    category_hit = category in news_prefs
-    industry_terms = _extract_profile_terms(boss.get("industry", ""))
-    industry_hit = any(term in text for term in industry_terms if len(term) > 1)
-
-    if keyword_hits >= 1 or category_hit:
+    if score >= 46:
         return 2
-    if industry_hit or category == "政策":
+    if score >= 22:
         return 1
     return 0
 
 
 def _event_relevance_tier(boss: dict, event: dict) -> int:
-    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
-    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
-    event_prefs = _infer_boss_event_preferences(boss)
-
-    event_keywords = [str(kw).lower() for kw in event.get("keywords", [])]
-    event_industries = [str(ind).lower() for ind in event.get("target_industries", [])]
-    text = f"{event.get('title', '')} {event.get('description', '')} {' '.join(event_keywords)} {' '.join(event_industries)}".lower()
-    if any(ig and ig in text for ig in ignore_keywords):
+    score, _ = _event_relevance_score(boss, event)
+    if score < 0:
         return -1
-
-    keyword_hits = sum(1 for kw in boss_keywords if kw and (kw in text or any(kw in ek for ek in event_keywords)))
-    industry_hit = any(any(pref in ind or ind in pref for ind in event_industries) for pref in event_prefs)
-    industry_terms = _extract_profile_terms(boss.get("industry", ""))
-    term_hit = any(term in text for term in industry_terms if len(term) > 1)
-
-    if industry_hit or keyword_hits >= 2:
+    if score >= 52:
         return 2
-    if keyword_hits == 1 or term_hit:
+    if score >= 26:
         return 1
     return 0
 
@@ -2202,26 +2326,39 @@ def _build_industry_event_pool(boss: dict, events: list[dict], top_n: int = 18, 
         seen_titles.add(title_key)
         deduped.append(event)
 
-    primary: list[dict] = []
-    secondary: list[dict] = []
+    primary: list[tuple[int, tuple[int, int, int], dict]] = []
+    secondary: list[tuple[int, tuple[int, int, int], dict]] = []
     for event in deduped:
+        relevance_score, matched = _event_relevance_score(boss, event)
+        if relevance_score < 0:
+            continue
         tier = _event_relevance_tier(boss, event)
-        if tier >= 2:
-            primary.append(event)
-        elif tier == 1:
-            secondary.append(event)
+        if tier <= 0:
+            continue
 
-    primary.sort(key=_event_rank_key, reverse=True)
-    secondary.sort(key=_event_rank_key, reverse=True)
+        event_copy = {
+            **event,
+            "score": max(int(event.get("score", 0) or 0), min(96, int(relevance_score))),
+            "matched_keywords": event.get("matched_keywords") or (matched[:3] if matched else [boss.get("industry", "行业相关")[:8]]),
+        }
+        rank_key = _event_rank_key(event_copy)
+
+        if tier >= 2:
+            primary.append((int(event_copy["score"]), rank_key, event_copy))
+        elif tier == 1:
+            secondary.append((int(event_copy["score"]), rank_key, event_copy))
+
+    primary.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    secondary.sort(key=lambda item: (item[0], item[1]), reverse=True)
 
     selected: list[dict] = []
     if primary:
-        selected.extend(primary[:top_n])
+        selected.extend(item[2] for item in primary[:top_n])
         if len(selected) < top_n:
-            selected.extend(secondary[: top_n - len(selected)])
+            selected.extend(item[2] for item in secondary[: top_n - len(selected)])
     elif secondary:
         keep = max(1, min(min_secondary, len(secondary), top_n))
-        selected.extend(secondary[:keep])
+        selected.extend(item[2] for item in secondary[:keep])
 
     return selected[:top_n]
 
@@ -2236,26 +2373,38 @@ def _build_industry_news_pool(boss: dict, news_items: list[dict], top_n: int = 2
         seen_titles.add(title_key)
         deduped.append(item)
 
-    primary: list[dict] = []
-    secondary: list[dict] = []
+    primary: list[tuple[int, dict]] = []
+    secondary: list[tuple[int, dict]] = []
     for item in deduped:
+        relevance_score, matched = _news_relevance_score(boss, item)
+        if relevance_score < 0:
+            continue
         tier = _news_relevance_tier(boss, item)
-        if tier >= 2:
-            primary.append(item)
-        elif tier == 1:
-            secondary.append(item)
+        if tier <= 0:
+            continue
 
-    primary.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
-    secondary.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
+        news_copy = {
+            **item,
+            "score": max(int(item.get("score", 0) or 0), min(95, int(relevance_score))),
+            "matched": item.get("matched") or (matched[:3] if matched else [str(item.get("category", "行业热点"))]),
+        }
+
+        if tier >= 2:
+            primary.append((int(news_copy["score"]), news_copy))
+        elif tier == 1:
+            secondary.append((int(news_copy["score"]), news_copy))
+
+    primary.sort(key=lambda item: item[0], reverse=True)
+    secondary.sort(key=lambda item: item[0], reverse=True)
 
     selected: list[dict] = []
     if primary:
-        selected.extend(primary[:top_n])
+        selected.extend(item[1] for item in primary[:top_n])
         if len(selected) < top_n:
-            selected.extend(secondary[: top_n - len(selected)])
+            selected.extend(item[1] for item in secondary[: top_n - len(selected)])
     elif secondary:
         keep = max(1, min(min_secondary, len(secondary), top_n))
-        selected.extend(secondary[:keep])
+        selected.extend(item[1] for item in secondary[:keep])
 
     return selected[:top_n]
 
@@ -2466,47 +2615,20 @@ def _generate_smart_goal(
 
 
 def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4) -> list[dict]:
-    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
-    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
-    city = boss.get("city", "")
-    news_prefs = _infer_boss_news_preferences(boss)
-
     scored: list[tuple[int, int, dict]] = []
     for item in news_items:
-        title = str(item.get("title", ""))
-        category = str(item.get("category", ""))
-        title_lower = title.lower()
-        category_lower = category.lower()
-
-        if any(ig in title_lower or ig in category_lower for ig in ignore_keywords):
+        relevance_score, matched = _news_relevance_score(boss, item)
+        if relevance_score < 0:
             continue
 
         tier = _news_relevance_tier(boss, item)
-        if tier < 0:
+        if tier <= 0:
             continue
-
-        score = 8
-        matched: list[str] = []
-
-        for kw in boss_keywords:
-            if kw and (kw in title_lower or kw in category_lower):
-                score += 14
-                matched.append(kw)
-
-        if city and city in title:
-            score += 8
-
-        if category in news_prefs:
-            score += 16
-        elif category in {"政策", "金融", "AI科技", "电商", "外贸", "跨境电商", "制造业", "新能源", "法律科技"}:
-            score += 4
-
-        score += tier * 10
 
         news_copy = {
             **item,
-            "score": min(76, score),
-            "matched": list(dict.fromkeys(matched))[:3] or ([category] if category else ["行业热点"]),
+            "score": max(int(item.get("score", 0) or 0), min(84, int(relevance_score))),
+            "matched": item.get("matched") or (matched[:3] if matched else [str(item.get("category", "行业热点"))]),
         }
         scored.append((tier, int(news_copy["score"]), news_copy))
 
@@ -2521,61 +2643,34 @@ def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4
         if len(selected) < top_n:
             selected.extend(secondary[: top_n - len(selected)])
     elif secondary:
-        # 没有强相关时至少保留 1-2 条次级相关
         keep = max(1, min(2, top_n, len(secondary)))
         selected.extend(secondary[:keep])
-
-    if len(selected) < top_n:
-        leftovers = [item for _, _, item in scored if item not in selected]
-        selected.extend(leftovers[: top_n - len(selected)])
 
     return selected[:top_n]
 
 
 def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -> list[dict]:
-    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
-    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
-    city = boss.get("city", "")
-
-    scored: list[tuple[int, int, dict]] = []
+    scored: list[tuple[int, int, tuple[int, int, int], dict]] = []
     for event in events:
-        text = f"{event.get('title', '')} {event.get('description', '')}".lower()
-        if any(ig in text for ig in ignore_keywords):
+        relevance_score, matched = _event_relevance_score(boss, event)
+        if relevance_score < 0:
             continue
 
         tier = _event_relevance_tier(boss, event)
-        if tier < 0:
+        if tier <= 0:
             continue
-
-        score = 10
-        matched_keywords: list[str] = []
-        for kw in boss_keywords:
-            if kw and (kw in text or any(kw in str(ek).lower() for ek in event.get("keywords", []))):
-                score += 12
-                matched_keywords.append(kw)
-
-        score += tier * 10
-
-        if city and city in str(event.get("location", "")):
-            score += 10
-        if event.get("format") == "线上":
-            score += 6
-        if event.get("value") == "高":
-            score += 6
-        if float(event.get("travel_hours", 9) or 9) <= MAX_TRAVEL_HOURS:
-            score += 8
 
         event_copy = {
             **event,
-            "score": min(78, int(score)),
-            "matched_keywords": list(dict.fromkeys(matched_keywords))[:3] or ([boss.get("industry", "行业相关")[:8]] if tier >= 1 else ["同城/低成本可达"]),
+            "score": max(int(event.get("score", 0) or 0), min(86, int(relevance_score))),
+            "matched_keywords": event.get("matched_keywords") or (matched[:3] if matched else [boss.get("industry", "行业相关")[:8]]),
         }
-        scored.append((tier, int(event_copy["score"]), event_copy))
+        scored.append((tier, int(event_copy["score"]), _event_rank_key(event_copy), event_copy))
 
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
 
-    primary = [item for tier, _, item in scored if tier >= 2]
-    secondary = [item for tier, _, item in scored if tier == 1]
+    primary = [item for tier, _, _, item in scored if tier >= 2]
+    secondary = [item for tier, _, _, item in scored if tier == 1]
     selected: list[dict] = []
 
     if primary:
@@ -2585,10 +2680,6 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
     elif secondary:
         keep = max(1, min(2, top_n, len(secondary)))
         selected.extend(secondary[:keep])
-
-    if len(selected) < top_n:
-        leftovers = [item for _, _, item in scored if item not in selected]
-        selected.extend(leftovers[: top_n - len(selected)])
 
     return selected[:top_n]
 
@@ -3084,6 +3175,17 @@ def _build_travel_entries(event: dict, geo_profile: dict | None = None) -> list[
     return entries[:4]
 
 
+def _event_detail_url(event: dict) -> str:
+    event_url = str(event.get("url", "")).strip()
+    if event_url:
+        return event_url
+
+    title = _normalize_event_text(str(event.get("title", "活动详情")), max_len=72)
+    location = _normalize_event_text(str(event.get("location", "")), max_len=32)
+    query = " ".join(part for part in [title, location, "活动", "报名"] if part)
+    return f"https://www.baidu.com/s?wd={quote_plus(query)}"
+
+
 def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_geo_profile: dict | None = None) -> None:
     has_events = bool(matched_events)
     has_news = bool(matched_news)
@@ -3101,15 +3203,11 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
             matched_kw = "、".join(event.get("matched_keywords", [])[:3]) or "行业相关"
             travel_note = event.get("travel_note", "")
             travel_line = f"<div class=\"wf-action\">到场成本：{html.escape(travel_note)}</div>" if travel_note else ""
-            event_url = str(event.get("url", "")).strip()
+            event_url = _event_detail_url(event)
             deadline_text = str(event.get("registration_deadline", "尽快确认报名")).strip() or "尽快确认报名"
-            if deadline_text == "详见活动页" and event_url:
-                action_line = (
-                    f"<div class=\"wf-action\">建议动作："
-                    f"<a href=\"{html.escape(event_url)}\" target=\"_blank\" rel=\"noopener noreferrer\">详见活动页</a></div>"
-                )
-            else:
-                action_line = f"<div class=\"wf-action\">建议动作：{html.escape(deadline_text)}</div>"
+            deadline_line = ""
+            if deadline_text and deadline_text != "详见活动页":
+                deadline_line = f"<div class=\"wf-action\">报名信息：{html.escape(deadline_text)}</div>"
 
             travel_entries = _build_travel_entries(event, geo_profile=user_geo_profile)
             travel_entry_html = ""
@@ -3125,10 +3223,10 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                     f"""
                     <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
                                             <div class="wf-tag tag-event">什么值得做</div>
-                      <div class="wf-title">{html.escape(event.get('title', '商业活动'))}</div>
+                                            <div class="wf-title">{html.escape(event.get('title', '商业活动'))} <a href="{html.escape(event_url)}" target="_blank" rel="noopener noreferrer">详见活动页</a></div>
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
-                      {action_line}
+                                            {deadline_line}
                       {travel_line}
                       {travel_entry_html}
                     </article>
@@ -3158,7 +3256,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                       <div class="wf-title">{html.escape(news.get('title', '行业热点'))}</div>
                       <div class="wf-meta">相关度 {score} 分 ｜ 类别：{html.escape(news.get('category', '资讯'))} ｜ 关键词：{html.escape(matched_kw)}</div>
                       <div class="wf-reason">机会解释：该热点与当前业务路径有直接连接，具备短期转化可能。</div>
-                      <div class="wf-action">建议动作：{html.escape(action)}</div>
+                                            <div class="wf-action">{html.escape(action)}</div>
                     </article>
                     """
                 )
