@@ -234,6 +234,33 @@ POLICY_TITLE_EXCLUDE_MARKERS = [
     "注册",
     "下载",
 ]
+POLICY_GENERIC_SECTION_TITLES = {
+    "政策",
+    "政策法规",
+    "政策文件",
+    "政策解读",
+    "通知",
+    "通知公告",
+    "公告",
+    "新闻",
+    "新闻中心",
+    "信息公开",
+    "政务公开",
+    "工作动态",
+    "更多",
+}
+POLICY_DETAIL_URL_BLOCK_MARKERS = [
+    "/index",
+    "/list",
+    "/column",
+    "/channel",
+    "/node",
+    "/zt",
+    "/special",
+    "/search",
+    "/sitemap",
+]
+POLICY_DETAIL_VERIFY_TIMEOUT = 4
 
 SOURCE_HOME_URL_MAP = {
     "中国政府网政策": "https://www.gov.cn/zhengce/",
@@ -1082,8 +1109,106 @@ def _looks_like_policy_title(title: str) -> bool:
     if any(marker in text for marker in POLICY_TITLE_EXCLUDE_MARKERS):
         return False
 
+    if text in POLICY_GENERIC_SECTION_TITLES:
+        return False
+
     markers = POLICY_TITLE_EXTRA_MARKERS + SINA_POLICY_TITLE_MARKERS
     return any(marker in text for marker in markers)
+
+
+def _looks_like_policy_detail_url(raw_url: str) -> bool:
+    url = _normalize_url_with_base(raw_url)
+    if not url:
+        return False
+
+    lower = url.lower()
+    if re.match(r"^https?://[^/]+/?$", lower):
+        return False
+
+    path = re.sub(r"^https?://[^/]+", "", lower)
+    if not path or path == "/":
+        return False
+
+    blocked = any(marker in path for marker in POLICY_DETAIL_URL_BLOCK_MARKERS)
+    has_id_hint = bool(re.search(r"(?:content|article|detail|doc|show|view)[_\-/]?\d{3,}", lower))
+    has_query_id = bool(re.search(r"[?&](?:id|docid|articleid|contentid)=\d+", lower))
+    has_date_path = bool(re.search(r"/(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}", lower))
+    has_html = bool(re.search(r"\.(?:html?|shtml|php)(?:\?|$)", lower))
+
+    if blocked and not (has_id_hint or has_query_id or has_date_path):
+        return False
+
+    if has_id_hint or has_query_id or has_date_path:
+        return True
+
+    if has_html and not re.search(r"/(?:index|list|channel|column|node)[_.-]?", lower):
+        return True
+
+    path_segments = [seg for seg in path.split("/") if seg]
+    if len(path_segments) >= 3 and any(re.search(r"\d{4,}", seg) for seg in path_segments):
+        return True
+
+    return False
+
+
+def _extract_html_page_title(html_text: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", html_text or "", flags=re.I | re.S)
+    if not match:
+        return ""
+    return _clean_html_text(match.group(1) or "")
+
+
+def _normalize_policy_title_for_match(text: str) -> str:
+    clean = _clean_html_text(text)
+    if not clean:
+        return ""
+
+    for sep in ["|", "-", "_", "—", "–", "｜"]:
+        if sep in clean:
+            clean = clean.split(sep)[0]
+    clean = re.sub(r"[\s\u3000]+", "", clean)
+    clean = re.sub(r"[\[\]【】()（）<>《》\-_:：,，。！？!?.]", "", clean)
+    return clean[:80]
+
+
+def _is_policy_title_consistent(anchor_title: str, page_title: str) -> bool:
+    left = _normalize_policy_title_for_match(anchor_title)
+    right = _normalize_policy_title_for_match(page_title)
+    if not left or not right:
+        return False
+
+    if left in right or right in left:
+        return True
+
+    left_terms = set(_extract_profile_terms(left))
+    right_terms = set(_extract_profile_terms(right))
+    if left_terms and right_terms:
+        overlap = len(left_terms & right_terms) / max(1, len(left_terms))
+        if overlap >= 0.5:
+            return True
+
+    left_bigrams = {left[i:i + 2] for i in range(max(1, len(left) - 1))} if len(left) > 1 else {left}
+    right_bigrams = {right[i:i + 2] for i in range(max(1, len(right) - 1))} if len(right) > 1 else {right}
+    union = left_bigrams | right_bigrams
+    if not union:
+        return False
+    jaccard = len(left_bigrams & right_bigrams) / len(union)
+    return jaccard >= 0.35
+
+
+def _verify_policy_link_title(anchor_title: str, detail_url: str) -> bool:
+    if not _looks_like_policy_detail_url(detail_url):
+        return False
+
+    html_text = _safe_get_text(detail_url, timeout=POLICY_DETAIL_VERIFY_TIMEOUT)
+    if not html_text:
+        return False
+
+    page_title = _extract_html_page_title(html_text)
+    if not page_title:
+        return False
+
+    return _is_policy_title_consistent(anchor_title, page_title)
 
 
 def _extract_policy_items_from_portal(portal_name: str, portal_url: str, max_items: int = 2) -> list[dict]:
@@ -1110,9 +1235,15 @@ def _extract_policy_items_from_portal(portal_name: str, portal_url: str, max_ite
         if not href:
             continue
 
+        if not _looks_like_policy_detail_url(href):
+            continue
+
         href_host = re.sub(r"^https?://", "", href).split("/")[0].lower()
         if portal_host and href_host and (portal_host not in href_host and href_host not in portal_host):
             # 尽量保证是同一权威站点内链接，避免聚合页跨站跳转带来的噪声。
+            continue
+
+        if not _verify_policy_link_title(title, href):
             continue
 
         seen_titles.add(title_key)
@@ -4562,17 +4693,18 @@ def _event_detail_url(event: dict) -> str:
 
 
 def _news_detail_url(news: dict) -> str:
+    category = _normalize_event_text(str(news.get("category", "政策")), max_len=16)
     raw_link = str(news.get("link") or news.get("url") or "").strip()
     if raw_link:
         normalized = _normalize_url_with_base(raw_link)
         if normalized:
-            return normalized
+            if category != "政策" or _looks_like_policy_detail_url(normalized):
+                return normalized
 
     source_name = str(news.get("source", "")).strip()
     if source_name and source_name in SOURCE_HOME_URL_MAP:
         return SOURCE_HOME_URL_MAP[source_name]
 
-    category = _normalize_event_text(str(news.get("category", "政策")), max_len=16)
     if category == "政策":
         return "https://www.gov.cn/zhengce/"
     if category == "AI科技":
