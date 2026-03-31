@@ -67,16 +67,181 @@ DEFAULT_NEWS = [
 
 LOCAL_NEWS_RSS_SOURCES = [
     ("中国政府网政策", "https://www.gov.cn/zhengce/", "政策"),
-    ("百度财经", "https://news.baidu.com/n?cmd=4&class=finannews&tn=rss", "金融"),
-    ("百度民生", "https://news.baidu.com/n?cmd=4&class=civilnews&tn=rss", "政策"),
     ("36氪", "https://www.36kr.com/feed", "AI科技"),
     ("钛媒体", "https://www.tmtpost.com/rss.xml", "AI科技"),
 ]
 
 POLICY_NEWS_RSS_SOURCES = [
     ("中国政府网政策", "https://www.gov.cn/zhengce/"),
-    ("百度民生", "https://news.baidu.com/n?cmd=4&class=civilnews&tn=rss"),
 ]
+
+AUTHORITATIVE_POLICY_SOURCE_PORTALS = [
+    ("中国政府网", "http://www.gov.cn"),
+    ("外交部", "https://www.fmprc.gov.cn"),
+    ("国防部", "http://www.mod.gov.cn"),
+    ("国家发展和改革委员会", "https://www.ndrc.gov.cn"),
+    ("教育部", "http://www.moe.gov.cn"),
+    ("科学技术部", "https://www.most.gov.cn"),
+    ("工业和信息化部", "https://www.miit.gov.cn"),
+    ("国家民族事务委员会", "https://www.neac.gov.cn"),
+    ("公安部", "https://www.mps.gov.cn"),
+    ("民政部", "https://www.mca.gov.cn"),
+    ("司法部", "https://www.moj.gov.cn"),
+    ("财政部", "http://www.mof.gov.cn"),
+    ("人力资源和社会保障部", "https://www.mohrss.gov.cn"),
+    ("自然资源部", "https://www.mnr.gov.cn"),
+    ("生态环境部", "https://www.mee.gov.cn"),
+    ("住房和城乡建设部", "https://www.mohurd.gov.cn"),
+    ("交通运输部", "https://www.mot.gov.cn"),
+    ("水利部", "http://www.mwr.gov.cn"),
+    ("农业农村部", "http://www.moa.gov.cn"),
+    ("商务部", "http://www.mofcom.gov.cn"),
+    ("文化和旅游部", "https://www.mct.gov.cn"),
+    ("国家卫生健康委员会", "http://www.nhc.gov.cn"),
+    ("退役军人事务部", "http://www.mva.gov.cn"),
+    ("应急管理部", "https://www.mem.gov.cn"),
+    ("人民银行", "http://www.pbc.gov.cn"),
+    ("审计署", "https://www.audit.gov.cn"),
+    ("国务院国有资产监督管理委员会", "http://www.sasac.gov.cn"),
+    ("海关总署", "http://www.customs.gov.cn"),
+    ("国家税务总局", "http://www.chinatax.gov.cn"),
+    ("国家市场监督管理总局", "http://www.samr.gov.cn"),
+    ("国家广播电视总局", "https://www.nrta.gov.cn"),
+    ("国家体育总局", "https://www.sport.gov.cn"),
+    ("国家统计局", "http://www.stats.gov.cn"),
+    ("国家国际发展合作署", "http://www.cidca.gov.cn"),
+    ("国家医疗保障局", "http://www.nhsa.gov.cn"),
+    ("国务院参事室", "http://www.counsellor.gov.cn"),
+    ("国家机关事务管理局", "http://www.ggj.gov.cn"),
+    ("国务院港澳事务办公室", "https://www.hmo.gov.cn"),
+    ("国务院台湾事务办公室", "http://www.gwytb.gov.cn"),
+    ("国家互联网信息办公室", "http://www.cac.gov.cn"),
+    ("国务院新闻办公室", "http://www.scio.gov.cn"),
+    ("新华通讯社", "http://www.xinhuanet.com"),
+    ("中国科学院", "http://www.cas.cn"),
+    ("中国社会科学院", "http://www.cass.cn"),
+    ("中国工程院", "http://www.cae.cn"),
+    ("国务院发展研究中心", "http://www.drc.gov.cn"),
+    ("中国气象局", "http://www.cma.gov.cn"),
+    ("国家知识产权局", "https://www.cnipa.gov.cn"),
+    ("北京市政府", "http://www.beijing.gov.cn"),
+    ("上海市政府", "http://www.shanghai.gov.cn"),
+    ("天津市政府", "http://www.tj.gov.cn"),
+    ("重庆市政府", "http://www.cq.gov.cn"),
+    ("河北省政府", "http://www.hebei.gov.cn"),
+    ("山西省政府", "http://www.shanxi.gov.cn"),
+    ("内蒙古自治区政府", "http://www.nmg.gov.cn"),
+    ("辽宁省政府", "http://www.ln.gov.cn"),
+    ("吉林省政府", "http://www.jl.gov.cn"),
+    ("黑龙江省政府", "http://www.hlj.gov.cn"),
+    ("江苏省政府", "http://www.jiangsu.gov.cn"),
+    ("浙江省政府", "http://www.zj.gov.cn"),
+    ("安徽省政府", "http://www.ah.gov.cn"),
+    ("福建省政府", "http://www.fujian.gov.cn"),
+    ("江西省政府", "http://www.jiangxi.gov.cn"),
+    ("山东省政府", "http://www.shandong.gov.cn"),
+    ("河南省政府", "http://www.henan.gov.cn"),
+    ("湖北省政府", "http://www.hubei.gov.cn"),
+    ("湖南省政府", "http://www.hunan.gov.cn"),
+    ("广东省政府", "http://www.gd.gov.cn"),
+    ("广西壮族自治区政府", "http://www.gxzf.gov.cn"),
+    ("海南省政府", "http://www.hainan.gov.cn"),
+    ("四川省政府", "http://www.sc.gov.cn"),
+    ("贵州省政府", "http://www.guizhou.gov.cn"),
+    ("云南省政府", "http://www.yn.gov.cn"),
+    ("西藏自治区政府", "http://www.xizang.gov.cn"),
+    ("陕西省政府", "http://www.shaanxi.gov.cn"),
+    ("甘肃省政府", "http://www.gansu.gov.cn"),
+    ("青海省政府", "http://www.qinghai.gov.cn"),
+    ("宁夏回族自治区政府", "http://www.nx.gov.cn"),
+    ("新疆维吾尔自治区政府", "http://www.xinjiang.gov.cn"),
+    ("香港特别行政区政府", "https://www.gov.hk"),
+    ("澳门特别行政区政府", "https://www.gov.mo"),
+    ("人民网", "http://www.people.com.cn"),
+    ("新华网", "http://www.xinhuanet.com"),
+    ("央视网", "http://www.cctv.com"),
+    ("中国网", "http://www.china.com.cn"),
+    ("国际在线", "http://www.cri.cn"),
+    ("中国日报网", "http://www.chinadaily.com.cn"),
+    ("央广网", "http://www.cnr.cn"),
+    ("中国新闻网", "http://www.chinanews.com"),
+    ("中国青年网", "http://www.youth.cn"),
+    ("光明网", "http://www.gmw.cn"),
+    ("中国经济网", "http://www.ce.cn"),
+    ("中国军网", "http://www.81.cn"),
+    ("求是网", "http://www.qstheory.cn"),
+    ("环球网", "http://www.huanqiu.com"),
+    ("澎湃新闻", "https://www.thepaper.cn"),
+    ("上观新闻", "https://www.shobserver.com"),
+    ("封面新闻", "http://www.thecover.cn"),
+    ("红星新闻", "http://www.cdsb.com"),
+    ("浙江在线", "http://www.zjol.com.cn"),
+    ("南方网", "http://www.southcn.com"),
+    ("东方网", "http://www.eastday.com"),
+    ("华龙网", "http://www.cqnews.net"),
+    ("四川在线", "http://www.scol.com.cn"),
+    ("大众网", "http://www.dzwww.com"),
+    ("红网", "http://www.rednet.cn"),
+    ("36氪", "https://www.36kr.com"),
+    ("钛媒体", "https://www.tmtpost.com"),
+    ("新浪", "https://www.sina.com.cn"),
+    ("腾讯新闻", "https://news.qq.com"),
+    ("网易新闻", "https://news.163.com"),
+    ("搜狐新闻", "https://www.sohu.com"),
+    ("凤凰网", "https://www.ifeng.com"),
+    ("界面新闻", "https://www.jiemian.com"),
+    ("虎嗅", "https://www.huxiu.com"),
+    ("第一财经", "https://www.yicai.com"),
+    ("财新网", "https://www.caixin.com"),
+    ("21世纪经济报道", "https://www.21jingji.com"),
+    ("每日经济新闻", "https://www.nbd.com.cn"),
+    ("观察者网", "https://www.guancha.cn"),
+    ("中央纪委国家监委", "https://www.ccdi.gov.cn"),
+    ("中共中央党校（国家行政学院）", "https://www.ccps.gov.cn"),
+    ("中国文明网", "http://www.wenming.cn"),
+    ("学习强国", "https://www.xuexi.cn"),
+]
+
+POLICY_SOURCE_BATCH_SIZE = 18
+POLICY_SOURCE_PER_SITE = 2
+POLICY_TITLE_EXTRA_MARKERS = [
+    "政策",
+    "通知",
+    "通告",
+    "公告",
+    "意见",
+    "办法",
+    "细则",
+    "方案",
+    "措施",
+    "实施",
+    "扶持",
+    "补贴",
+    "申报",
+    "征求意见",
+    "管理规定",
+    "指导",
+]
+POLICY_TITLE_EXCLUDE_MARKERS = [
+    "首页",
+    "联系我们",
+    "网站地图",
+    "版权",
+    "隐私",
+    "客户端",
+    "登录",
+    "注册",
+    "下载",
+]
+
+SOURCE_HOME_URL_MAP = {
+    "中国政府网政策": "https://www.gov.cn/zhengce/",
+    "新浪财经（实时）": "https://finance.sina.com.cn/",
+    "36氪": "https://www.36kr.com/",
+    "钛媒体": "https://www.tmtpost.com/",
+}
+for portal_name, portal_url in AUTHORITATIVE_POLICY_SOURCE_PORTALS:
+    SOURCE_HOME_URL_MAP.setdefault(portal_name, portal_url)
 
 SINA_ROLL_API_URL = "https://feed.mix.sina.com.cn/api/roll/get"
 SINA_POLICY_ROLL_LIDS = [1686, 1687]
@@ -371,6 +536,29 @@ def _safe_get_text(url: str, timeout: int = 14) -> str:
         return response.text
     except Exception:
         return ""
+
+
+def _normalize_url_with_base(raw_url: str, base_url: str = "") -> str:
+    url = html.unescape(str(raw_url or "")).strip()
+    if not url:
+        return ""
+
+    if url.startswith("javascript:") or url.startswith("#"):
+        return ""
+
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url.startswith("/"):
+        url = urljoin(base_url, url) if base_url else ""
+    elif not re.match(r"^https?://", url):
+        url = urljoin(base_url, url) if base_url else ""
+
+    if not url:
+        return ""
+    if not re.match(r"^https?://", url):
+        return ""
+
+    return url
 
 
 def _clean_html_text(raw: str) -> str:
@@ -857,6 +1045,103 @@ def _infer_event_location(title: str, description: str, event_format: str, fallb
     return "线上活动" if event_format == "线上" else fallback_label
 
 
+def _looks_like_policy_title(title: str) -> bool:
+    text = _clean_html_text(title)
+    if not text or len(text) < 6:
+        return False
+
+    if any(marker in text for marker in POLICY_TITLE_EXCLUDE_MARKERS):
+        return False
+
+    markers = POLICY_TITLE_EXTRA_MARKERS + SINA_POLICY_TITLE_MARKERS
+    return any(marker in text for marker in markers)
+
+
+def _extract_policy_items_from_portal(portal_name: str, portal_url: str, max_items: int = 2) -> list[dict]:
+    html_text = _safe_get_text(portal_url, timeout=8)
+    if not html_text:
+        return []
+
+    anchor_pattern = re.compile(r'<a[^>]+href=["\'](?P<href>[^"\']+)["\'][^>]*>(?P<title>.*?)</a>', flags=re.I | re.S)
+    collected: list[dict] = []
+    seen_titles = set()
+
+    portal_host = re.sub(r"^https?://", "", portal_url).split("/")[0].lower()
+
+    for match in anchor_pattern.finditer(html_text):
+        title = _clean_html_text(match.group("title") or "")
+        if not _looks_like_policy_title(title):
+            continue
+
+        title_key = re.sub(r"\s+", " ", title.lower()).strip()
+        if title_key in seen_titles:
+            continue
+
+        href = _normalize_url_with_base(match.group("href") or "", portal_url)
+        if not href:
+            continue
+
+        href_host = re.sub(r"^https?://", "", href).split("/")[0].lower()
+        if portal_host and href_host and (portal_host not in href_host and href_host not in portal_host):
+            # 尽量保证是同一权威站点内链接，避免聚合页跨站跳转带来的噪声。
+            continue
+
+        seen_titles.add(title_key)
+        collected.append(
+            {
+                "title": title,
+                "link": href,
+                "description": f"来自{portal_name}官方发布。",
+                "published": "",
+            }
+        )
+        if len(collected) >= max_items:
+            break
+
+    return collected
+
+
+def _build_authoritative_policy_portal_news(max_items: int = 20) -> list[dict]:
+    portals = AUTHORITATIVE_POLICY_SOURCE_PORTALS
+    if not portals:
+        return []
+
+    batch_size = min(POLICY_SOURCE_BATCH_SIZE, len(portals))
+    seed = int(datetime.now().strftime("%Y%m%d%H"))
+    start = seed % len(portals)
+
+    selected_portals = [portals[(start + idx) % len(portals)] for idx in range(batch_size)]
+
+    news: list[dict] = []
+    seen_titles = set()
+    for portal_name, portal_url in selected_portals:
+        items = _extract_policy_items_from_portal(portal_name, portal_url, max_items=POLICY_SOURCE_PER_SITE)
+        for item in items:
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+            title_key = re.sub(r"\s+", " ", title.lower()).strip()
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+
+            news.append(
+                {
+                    "id": f"R{len(news) + 1:02d}",
+                    "title": title,
+                    "category": "政策",
+                    "source": portal_name,
+                    "published": str(item.get("published", "")),
+                    "url": str(item.get("link", "")),
+                }
+            )
+
+            if len(news) >= max_items:
+                return news
+
+    return news
+
+
 def _build_google_news_fallback(max_items: int = 16) -> list[dict]:
     seen_titles = set()
     news: list[dict] = []
@@ -940,6 +1225,26 @@ def _parse_sina_policy_items(max_items: int = 10) -> list[dict]:
 def _build_policy_only_news(max_items: int = 8) -> list[dict]:
     seen_titles = set()
     news: list[dict] = []
+
+    authoritative_portal_news = _build_authoritative_policy_portal_news(max_items=max_items * 3)
+    for item in authoritative_portal_news:
+        title = item.get("title", "").strip()
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+
+        news.append(
+            {
+                "id": f"R{len(news) + 1:02d}",
+                "title": title,
+                "category": "政策",
+                "source": item.get("source", "权威站点"),
+                "published": item.get("published", ""),
+                "url": item.get("url", ""),
+            }
+        )
+        if len(news) >= max_items:
+            return news
 
     for source_name, source_url in POLICY_NEWS_RSS_SOURCES:
         if source_name == "中国政府网政策":
@@ -1029,12 +1334,11 @@ def _build_live_news(max_items: int = 24) -> list[dict]:
     policy_quota = min(max_items, max(6, max_items // 3))
     policy_news = _build_policy_only_news(max_items=policy_quota)
     local_news = _build_local_news(max_items=max_items * 2)
-    fallback_news = _build_google_news_fallback(max_items=max_items)
 
     merged: list[dict] = []
     seen_titles = set()
 
-    for batch in [policy_news, local_news, fallback_news]:
+    for batch in [policy_news, local_news]:
         for item in batch:
             title = item.get("title", "").strip()
             if not title or title in seen_titles:
@@ -3955,12 +4259,22 @@ def _event_detail_url(event: dict) -> str:
 def _news_detail_url(news: dict) -> str:
     raw_link = str(news.get("link") or news.get("url") or "").strip()
     if raw_link:
-        return raw_link
+        normalized = _normalize_url_with_base(raw_link)
+        if normalized:
+            return normalized
 
-    title = _normalize_event_text(str(news.get("title", "政策详情")), max_len=72)
+    source_name = str(news.get("source", "")).strip()
+    if source_name and source_name in SOURCE_HOME_URL_MAP:
+        return SOURCE_HOME_URL_MAP[source_name]
+
     category = _normalize_event_text(str(news.get("category", "政策")), max_len=16)
-    query = " ".join(part for part in [title, category, "政策", "解读"] if part)
-    return f"https://www.baidu.com/s?wd={quote_plus(query)}"
+    if category == "政策":
+        return "https://www.gov.cn/zhengce/"
+    if category == "AI科技":
+        return "https://www.36kr.com/"
+    if category == "金融":
+        return "https://finance.sina.com.cn/"
+    return "https://www.xinhuanet.com/"
 
 
 def _to_html_multiline(text: str) -> str:
