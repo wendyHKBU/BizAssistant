@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import html
+import textwrap
 
 import streamlit as st
 import streamlit.components.v1 as components
@@ -46,52 +47,57 @@ DEFAULT_NEWS = [
 ]
 
 
+def block_html(template: str) -> str:
+    """Normalize HTML blocks to avoid markdown treating indented tags as code."""
+    return textwrap.dedent(template).strip()
+
+
 def inject_styles() -> None:
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&family=Noto+Serif+SC:wght@600;700;900&family=Rajdhani:wght@500;700&display=swap');
-
         :root {
-            --navy-0: #061223;
-            --navy-1: #0A1D38;
-            --navy-2: #0F2A4B;
-            --navy-3: #173A62;
-            --gold: #E2C084;
-            --gold-soft: #F3DEB7;
-            --teal: #2EB2A5;
-            --teal-soft: #7BD8CD;
-            --text-main: #ECF3FF;
-            --text-muted: #9FB3CD;
-            --line: rgba(226, 192, 132, 0.25);
-            --card-bg: rgba(16, 42, 74, 0.74);
-            --card-bg-strong: rgba(19, 49, 84, 0.92);
+            --bg: #f5f5f7;
+            --bg-2: #eef2f8;
+            --surface: #ffffff;
+            --surface-soft: #f8f9fc;
+            --text-main: #1d1d1f;
+            --text-muted: #6e6e73;
+            --deep-blue: #0f3f79;
+            --deep-blue-2: #174d8f;
+            --champagne: #c7a96d;
+            --teal: #1f9f98;
+            --line: rgba(15, 63, 121, 0.12);
+            --shadow: 0 20px 50px rgba(27, 46, 78, 0.08);
+            --shadow-soft: 0 10px 28px rgba(27, 46, 78, 0.06);
         }
 
         .stApp {
             background:
-                radial-gradient(1200px 500px at 85% -5%, rgba(46, 178, 165, 0.18), transparent 60%),
-                radial-gradient(900px 460px at -5% 15%, rgba(226, 192, 132, 0.18), transparent 70%),
-                linear-gradient(160deg, var(--navy-0) 0%, var(--navy-1) 38%, var(--navy-2) 100%);
-            color: var(--text-main);
-            font-family: 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', sans-serif;
+                radial-gradient(1200px 520px at 90% -8%, rgba(15, 63, 121, 0.09), transparent 62%),
+                radial-gradient(880px 440px at -5% 10%, rgba(199, 169, 109, 0.16), transparent 64%),
+                linear-gradient(165deg, var(--bg) 0%, var(--bg-2) 100%);
+            color: var(--text-main) !important;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", sans-serif;
         }
 
         .main .block-container {
-            max-width: 1160px;
-            padding-top: 1.2rem;
+            max-width: 1120px;
+            padding-top: 1.1rem;
             padding-bottom: 2.8rem;
         }
 
-        h1, h2, h3 {
-            font-family: 'Noto Serif SC', 'PingFang SC', serif !important;
-            letter-spacing: 0.01em;
-            color: var(--text-main);
+        h1, h2, h3, h4 {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif !important;
+            color: var(--text-main) !important;
+            letter-spacing: -0.01em;
+            font-weight: 700 !important;
         }
 
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, rgba(7, 20, 40, 0.97), rgba(11, 32, 58, 0.95));
-            border-right: 1px solid rgba(226, 192, 132, 0.18);
+            background: rgba(255, 255, 255, 0.88);
+            border-right: 1px solid rgba(15, 63, 121, 0.1);
+            backdrop-filter: blur(14px);
         }
 
         [data-testid="stSidebar"] * {
@@ -100,39 +106,40 @@ def inject_styles() -> None:
 
         .stSelectbox label,
         .stTextArea label {
-            color: var(--gold-soft) !important;
+            color: #425466 !important;
             font-weight: 700;
-            letter-spacing: 0.02em;
+            letter-spacing: 0;
         }
 
         .stTextArea textarea {
-            border-radius: 12px !important;
-            border: 1px solid rgba(226, 192, 132, 0.3) !important;
-            background: rgba(7, 23, 43, 0.65) !important;
+            border-radius: 14px !important;
+            border: 1px solid rgba(15, 63, 121, 0.14) !important;
+            background: #ffffff !important;
             color: var(--text-main) !important;
         }
 
         .stButton > button {
-            border-radius: 14px !important;
+            border-radius: 999px !important;
             border: 0 !important;
-            color: #0E2442 !important;
-            font-weight: 800 !important;
-            background: linear-gradient(135deg, #F1D7A6 0%, #D6B175 100%) !important;
-            box-shadow: 0 8px 24px rgba(226, 192, 132, 0.35);
+            color: #ffffff !important;
+            font-weight: 700 !important;
+            padding: 0.42rem 1rem !important;
+            background: linear-gradient(135deg, var(--deep-blue) 0%, var(--teal) 100%) !important;
+            box-shadow: 0 10px 26px rgba(15, 63, 121, 0.2);
             transition: transform 0.2s ease, box-shadow 0.2s ease;
         }
 
         .stButton > button:hover {
             transform: translateY(-1px);
-            box-shadow: 0 10px 30px rgba(226, 192, 132, 0.5);
+            box-shadow: 0 14px 34px rgba(15, 63, 121, 0.27);
         }
 
         .hero {
-            background: linear-gradient(145deg, rgba(17, 45, 78, 0.92), rgba(12, 35, 63, 0.9));
+            background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(248, 250, 255, 0.95));
             border: 1px solid var(--line);
-            border-radius: 22px;
-            padding: 1.1rem 1.2rem 1.2rem;
-            box-shadow: 0 22px 52px rgba(0, 0, 0, 0.28);
+            border-radius: 30px;
+            padding: 1.3rem 1.4rem 1.35rem;
+            box-shadow: var(--shadow);
             overflow: hidden;
             position: relative;
             animation: fadeUp 0.7s ease both;
@@ -142,8 +149,8 @@ def inject_styles() -> None:
             content: "";
             position: absolute;
             inset: -1px;
-            border-radius: 22px;
-            background: linear-gradient(120deg, rgba(46,178,165,0.18), rgba(226,192,132,0.16), transparent 55%);
+            border-radius: 30px;
+            background: linear-gradient(120deg, rgba(15, 63, 121, 0.06), rgba(199, 169, 109, 0.16), rgba(31, 159, 152, 0.08));
             pointer-events: none;
         }
 
@@ -156,16 +163,18 @@ def inject_styles() -> None:
         }
 
         .hero-title {
-            font-family: 'Noto Serif SC', serif;
-            font-size: clamp(1.55rem, 2.6vw, 2.25rem);
-            line-height: 1.1;
-            margin: 0 0 0.35rem;
+            font-size: clamp(1.65rem, 3vw, 2.75rem);
+            line-height: 1.05;
+            margin: 0 0 0.45rem;
+            letter-spacing: -0.03em;
+            color: #121519;
         }
 
         .hero-sub {
             color: var(--text-muted);
-            margin-bottom: 0.85rem;
-            line-height: 1.6;
+            margin-bottom: 0.92rem;
+            line-height: 1.65;
+            font-size: 1.01rem;
         }
 
         .hero-chip-row {
@@ -175,23 +184,25 @@ def inject_styles() -> None:
         }
 
         .hero-chip {
-            background: rgba(9, 28, 52, 0.72);
-            border: 1px solid rgba(123, 216, 205, 0.35);
-            color: var(--teal-soft);
+            background: #ffffff;
+            border: 1px solid rgba(15, 63, 121, 0.14);
+            color: #2f4667;
             border-radius: 999px;
-            padding: 0.28rem 0.66rem;
-            font-size: 0.82rem;
+            padding: 0.31rem 0.7rem;
+            font-size: 0.83rem;
             font-weight: 700;
+            box-shadow: 0 6px 16px rgba(15, 63, 121, 0.06);
         }
 
         .index-panel {
-            background: linear-gradient(165deg, rgba(8, 24, 45, 0.95), rgba(13, 33, 61, 0.88));
-            border-radius: 18px;
-            border: 1px solid rgba(226, 192, 132, 0.35);
-            padding: 0.85rem;
+            background: linear-gradient(165deg, #ffffff, #f6f8fc);
+            border-radius: 24px;
+            border: 1px solid rgba(15, 63, 121, 0.12);
+            padding: 0.9rem;
             text-align: center;
             position: relative;
             overflow: hidden;
+            box-shadow: var(--shadow-soft);
         }
 
         .index-ring {
@@ -200,21 +211,21 @@ def inject_styles() -> None:
             margin: 0.1rem auto 0.45rem;
             border-radius: 50%;
             background:
-                radial-gradient(circle at center, rgba(7, 18, 35, 0.98) 58%, transparent 59%),
-                conic-gradient(var(--teal) calc(var(--score) * 1%), var(--gold) calc(var(--score) * 1%), rgba(89,111,141,0.28) 0);
+                radial-gradient(circle at center, #ffffff 58%, transparent 59%),
+                conic-gradient(var(--deep-blue) calc(var(--score) * 1%), var(--champagne) calc(var(--score) * 1%), rgba(152, 166, 185, 0.34) 0);
             display: grid;
             place-items: center;
-            box-shadow: inset 0 0 28px rgba(0, 0, 0, 0.32);
+            box-shadow: inset 0 0 24px rgba(15, 63, 121, 0.08), 0 8px 24px rgba(15, 63, 121, 0.08);
             animation: pulseGlow 2.8s ease-in-out infinite;
         }
 
         .index-number {
-            font-family: 'Rajdhani', sans-serif;
+            font-family: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
             font-size: 2.7rem;
             font-weight: 700;
-            color: var(--gold-soft);
+            color: var(--deep-blue);
             line-height: 1;
-            letter-spacing: 0.03em;
+            letter-spacing: -0.02em;
         }
 
         .index-label {
@@ -224,9 +235,10 @@ def inject_styles() -> None:
         }
 
         .section-title {
-            margin: 1rem 0 0.2rem;
-            font-size: clamp(1.12rem, 1.6vw, 1.4rem);
-            letter-spacing: 0.01em;
+            margin: 1.15rem 0 0.3rem;
+            font-size: clamp(1.15rem, 1.9vw, 1.56rem);
+            letter-spacing: -0.01em;
+            color: #1f2937;
         }
 
         .section-desc {
@@ -237,7 +249,7 @@ def inject_styles() -> None:
         .timeline {
             position: relative;
             padding-left: 1.1rem;
-            margin-top: 0.2rem;
+            margin-top: 0.26rem;
         }
 
         .timeline::before {
@@ -247,18 +259,19 @@ def inject_styles() -> None:
             top: 0.2rem;
             bottom: 0.2rem;
             width: 2px;
-            background: linear-gradient(180deg, var(--gold), rgba(46,178,165,0.28));
+            background: linear-gradient(180deg, rgba(15, 63, 121, 0.4), rgba(31, 159, 152, 0.32));
         }
 
         .timeline-item {
             position: relative;
             margin-bottom: 0.7rem;
-            background: var(--card-bg);
-            border: 1px solid rgba(226, 192, 132, 0.24);
-            border-radius: 14px;
+            background: var(--surface);
+            border: 1px solid rgba(15, 63, 121, 0.1);
+            border-radius: 16px;
             padding: 0.62rem 0.72rem 0.64rem;
             animation: fadeUp 0.58s ease both;
             animation-delay: var(--d, 0s);
+            box-shadow: var(--shadow-soft);
         }
 
         .timeline-item::before {
@@ -269,9 +282,9 @@ def inject_styles() -> None:
             width: 11px;
             height: 11px;
             border-radius: 50%;
-            border: 2px solid var(--gold);
-            background: var(--navy-0);
-            box-shadow: 0 0 0 3px rgba(226, 192, 132, 0.14);
+            border: 2px solid var(--deep-blue);
+            background: #ffffff;
+            box-shadow: 0 0 0 3px rgba(15, 63, 121, 0.1);
         }
 
         .timeline-top {
@@ -283,9 +296,9 @@ def inject_styles() -> None:
         }
 
         .timeline-time {
-            font-family: 'Rajdhani', sans-serif;
+            font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
             font-size: 1rem;
-            color: var(--gold-soft);
+            color: var(--deep-blue);
             font-weight: 700;
             white-space: nowrap;
         }
@@ -299,26 +312,26 @@ def inject_styles() -> None:
         }
 
         .p-high {
-            color: #FFD9D9;
-            background: rgba(215, 64, 64, 0.3);
-            border: 1px solid rgba(255, 125, 125, 0.42);
+            color: #b42318;
+            background: #ffe6e2;
+            border: 1px solid #ffc3bb;
         }
 
         .p-mid {
-            color: #FFEDC9;
-            background: rgba(196, 143, 48, 0.3);
-            border: 1px solid rgba(239, 188, 95, 0.38);
+            color: #8d5f10;
+            background: #fff4dd;
+            border: 1px solid #f4deb0;
         }
 
         .p-low {
-            color: #CAF6EF;
-            background: rgba(46, 178, 165, 0.23);
-            border: 1px solid rgba(123, 216, 205, 0.42);
+            color: #0e766f;
+            background: #e5f8f4;
+            border: 1px solid #bdece3;
         }
 
         .timeline-title {
             font-weight: 700;
-            color: #EAF1FB;
+            color: #1f2937;
             margin-bottom: 0.2rem;
         }
 
@@ -330,17 +343,17 @@ def inject_styles() -> None:
 
         .waterfall {
             column-count: 2;
-            column-gap: 0.78rem;
+            column-gap: 0.84rem;
         }
 
         .wf-card {
             break-inside: avoid;
             margin: 0 0 0.78rem;
-            background: var(--card-bg-strong);
-            border: 1px solid rgba(226, 192, 132, 0.22);
-            border-radius: 15px;
+            background: var(--surface);
+            border: 1px solid rgba(15, 63, 121, 0.1);
+            border-radius: 18px;
             padding: 0.72rem;
-            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.18);
+            box-shadow: var(--shadow-soft);
             animation: fadeUp 0.55s ease both;
             animation-delay: var(--d, 0s);
         }
@@ -358,26 +371,26 @@ def inject_styles() -> None:
         }
 
         .tag-news {
-            color: #FAE4BC;
-            background: rgba(226, 192, 132, 0.2);
-            border: 1px solid rgba(226, 192, 132, 0.4);
+            color: #75511b;
+            background: #fdf4e4;
+            border: 1px solid #f2dfbd;
         }
 
         .tag-event {
-            color: #D0F5EF;
-            background: rgba(46, 178, 165, 0.2);
-            border: 1px solid rgba(123, 216, 205, 0.42);
+            color: #0f6d67;
+            background: #e8f8f5;
+            border: 1px solid #c7eee8;
         }
 
         .wf-title {
             font-weight: 800;
-            color: #F2F7FF;
+            color: #1f2937;
             margin-bottom: 0.3rem;
             line-height: 1.35;
         }
 
         .wf-meta {
-            color: #B4C7DE;
+            color: #6b7280;
             font-size: 0.82rem;
             margin-bottom: 0.35rem;
             line-height: 1.4;
@@ -391,33 +404,34 @@ def inject_styles() -> None:
         }
 
         .wf-reason {
-            color: #D8E6F8;
+            color: #334155;
         }
 
         .wf-action {
-            color: var(--teal-soft);
-            border-top: 1px dashed rgba(123, 216, 205, 0.35);
+            color: #0d7d77;
+            border-top: 1px dashed rgba(31, 159, 152, 0.3);
             padding-top: 0.35rem;
         }
 
         .model-card {
-            background: linear-gradient(160deg, rgba(18, 45, 79, 0.96), rgba(10, 29, 54, 0.94));
-            border: 1px solid rgba(226, 192, 132, 0.3);
-            border-radius: 16px;
+            background: linear-gradient(160deg, #ffffff, #f8fbff);
+            border: 1px solid rgba(15, 63, 121, 0.11);
+            border-radius: 20px;
             padding: 0.85rem;
             height: 100%;
             animation: fadeUp 0.6s ease both;
+            box-shadow: var(--shadow-soft);
         }
 
         .model-title {
             font-size: 1rem;
             font-weight: 800;
-            color: var(--gold-soft);
+            color: var(--deep-blue);
             margin-bottom: 0.38rem;
         }
 
         .model-body {
-            color: #DCE8F8;
+            color: #334155;
             line-height: 1.58;
             font-size: 0.92rem;
         }
@@ -430,10 +444,10 @@ def inject_styles() -> None:
 
         .metric-box {
             flex: 1;
-            border: 1px solid rgba(123, 216, 205, 0.3);
+            border: 1px solid rgba(15, 63, 121, 0.12);
             border-radius: 12px;
             padding: 0.45rem 0.5rem;
-            background: rgba(8, 24, 45, 0.45);
+            background: #f7f9fc;
         }
 
         .metric-name {
@@ -443,14 +457,14 @@ def inject_styles() -> None:
         }
 
         .metric-val {
-            font-family: 'Rajdhani', sans-serif;
+            font-family: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, sans-serif;
             font-size: 1.06rem;
-            color: var(--gold-soft);
+            color: var(--deep-blue-2);
             font-weight: 700;
         }
 
         .footer-note {
-            color: #9EB3CB;
+            color: #6e6e73;
             font-size: 0.85rem;
             margin-top: 0.8rem;
             text-align: center;
@@ -462,8 +476,8 @@ def inject_styles() -> None:
         }
 
         @keyframes pulseGlow {
-            0%, 100% { box-shadow: inset 0 0 28px rgba(0, 0, 0, 0.32), 0 0 0 rgba(46, 178, 165, 0.12); }
-            50% { box-shadow: inset 0 0 28px rgba(0, 0, 0, 0.32), 0 0 24px rgba(46, 178, 165, 0.16); }
+            0%, 100% { box-shadow: inset 0 0 24px rgba(15, 63, 121, 0.08), 0 0 0 rgba(31, 159, 152, 0.08); }
+            50% { box-shadow: inset 0 0 24px rgba(15, 63, 121, 0.08), 0 0 20px rgba(31, 159, 152, 0.14); }
         }
 
         @media (max-width: 900px) {
@@ -489,12 +503,12 @@ def inject_styles() -> None:
             }
 
             .hero {
-                border-radius: 18px;
-                padding: 0.85rem;
+                border-radius: 22px;
+                padding: 0.92rem;
             }
 
             .hero-title {
-                font-size: 1.45rem;
+                font-size: 1.55rem;
             }
 
             .index-ring {
@@ -589,30 +603,32 @@ def compute_opportunity_index(schedule: list[dict], matched_events: list[dict], 
 
 
 def render_hero(boss: dict, score: int, level: str, today_str: str) -> None:
-    hero_html = f"""
-    <section class="hero">
-      <div class="hero-grid">
-        <div>
-          <div class="hero-title">今日机会指数仪表盘</div>
-          <div class="hero-sub">{html.escape(today_str)} ｜ 为 {html.escape(boss['name'])} 定制。先执行关键动作，再放大高相关机会。</div>
-          <div class="hero-chip-row">
-            <span class="hero-chip">{html.escape(boss['industry'])}</span>
-            <span class="hero-chip">{html.escape(boss['city'])}</span>
-            <span class="hero-chip">目标：{html.escape(boss['current_goal'])}</span>
-          </div>
-        </div>
-        <div class="index-panel">
-          <div class="index-ring" style="--score:{score};">
+    hero_html = block_html(
+        f"""
+        <section class="hero">
+          <div class="hero-grid">
             <div>
-              <div class="index-number">{score}</div>
-              <div class="index-label">机会指数 / 100</div>
+              <div class="hero-title">今日机会指数仪表盘</div>
+              <div class="hero-sub">{html.escape(today_str)} ｜ 为 {html.escape(boss['name'])} 定制。先执行关键动作，再放大高相关机会。</div>
+              <div class="hero-chip-row">
+                <span class="hero-chip">{html.escape(boss['industry'])}</span>
+                <span class="hero-chip">{html.escape(boss['city'])}</span>
+                <span class="hero-chip">目标：{html.escape(boss['current_goal'])}</span>
+              </div>
+            </div>
+            <div class="index-panel">
+              <div class="index-ring" style="--score:{score};">
+                <div>
+                  <div class="index-number">{score}</div>
+                  <div class="index-label">机会指数 / 100</div>
+                </div>
+              </div>
+              <div class="index-label" style="color:#173f74; font-weight:700;">状态：{html.escape(level)}</div>
             </div>
           </div>
-          <div class="index-label" style="color:#DDEBFB; font-weight:700;">状态：{html.escape(level)}</div>
-        </div>
-      </div>
-    </section>
-    """
+        </section>
+        """
+    )
     st.markdown(hero_html, unsafe_allow_html=True)
 
 
@@ -624,18 +640,19 @@ def render_kpi_counter(schedule_count: int, event_count: int, news_count: int, s
       grid-template-columns: repeat(4, minmax(0, 1fr));
       gap: 10px;
       margin-top: 10px;
-      font-family: 'Noto Sans SC', sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
     }}
     .kpi-box {{
-      background: linear-gradient(165deg, rgba(18,43,74,0.94), rgba(8,25,45,0.93));
-      border: 1px solid rgba(226,192,132,0.28);
-      border-radius: 14px;
+      background: linear-gradient(165deg, #ffffff, #f8fbff);
+      border: 1px solid rgba(15, 63, 121, 0.12);
+      border-radius: 18px;
       padding: 10px 12px;
-      color: #EAF2FF;
+      color: #1f2937;
+      box-shadow: 0 10px 24px rgba(15, 63, 121, 0.08);
     }}
-    .kpi-label {{ color:#A7BCD5; font-size:12px; margin-bottom:2px; }}
-    .kpi-value {{ font-size:30px; line-height:1.05; font-family:'Rajdhani', sans-serif; color:#F3DEB7; font-weight:700; }}
-    .kpi-suffix {{ font-size:13px; color:#86D7CB; margin-left:3px; }}
+    .kpi-label {{ color:#6b7280; font-size:12px; margin-bottom:2px; }}
+    .kpi-value {{ font-size:30px; line-height:1.05; font-family:-apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif; color:#123f74; font-weight:700; letter-spacing:-0.02em; }}
+    .kpi-suffix {{ font-size:13px; color:#1f9f98; margin-left:3px; }}
     @media (max-width: 640px) {{ .kpi-wrap {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
     </style>
     <div class="kpi-wrap">
@@ -676,16 +693,18 @@ def render_timeline(actions: list[dict]) -> None:
         pri = item.get("priority", "中")
         pri_class = "p-high" if pri == "高" else ("p-mid" if pri == "中" else "p-low")
         rows.append(
-            f"""
-            <div class="timeline-item" style="--d:{0.08 * idx:.2f}s;">
-              <div class="timeline-top">
-                <span class="timeline-time">{html.escape(item.get('time', '今天'))}</span>
-                <span class="priority {pri_class}">{html.escape(pri)}优先级</span>
-              </div>
-              <div class="timeline-title">{html.escape(item.get('title', '执行重点任务'))}</div>
-              <div class="timeline-note">{html.escape(item.get('reason', '围绕今日目标推进。'))}</div>
-            </div>
-            """
+            block_html(
+                f"""
+                <div class="timeline-item" style="--d:{0.08 * idx:.2f}s;">
+                  <div class="timeline-top">
+                    <span class="timeline-time">{html.escape(item.get('time', '今天'))}</span>
+                    <span class="priority {pri_class}">{html.escape(pri)}优先级</span>
+                  </div>
+                  <div class="timeline-title">{html.escape(item.get('title', '执行重点任务'))}</div>
+                  <div class="timeline-note">{html.escape(item.get('reason', '围绕今日目标推进。'))}</div>
+                </div>
+                """
+            )
         )
 
     block = "<div class='timeline'>" + "".join(rows) + "</div>"
@@ -701,15 +720,17 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
     for idx, event in enumerate(matched_events, 1):
         matched_kw = "、".join(event.get("matched_keywords", [])[:3]) or "行业相关"
         cards.append(
-            f"""
-            <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
-              <div class="wf-tag tag-event">活动机会</div>
-              <div class="wf-title">{html.escape(event.get('title', '商业活动'))}</div>
-              <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
-              <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
-              <div class="wf-action">建议动作：{html.escape(event.get('registration_deadline', '尽快确认报名'))}</div>
-            </article>
-            """
+            block_html(
+                f"""
+                <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
+                  <div class="wf-tag tag-event">活动机会</div>
+                  <div class="wf-title">{html.escape(event.get('title', '商业活动'))}</div>
+                  <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
+                  <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
+                  <div class="wf-action">建议动作：{html.escape(event.get('registration_deadline', '尽快确认报名'))}</div>
+                </article>
+                """
+            )
         )
 
     start = len(cards)
@@ -718,15 +739,17 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
         matched_kw = "、".join(news.get("matched", [])[:2]) or news.get("category", "资讯")
         action = get_action(news.get("category", "政策"))
         cards.append(
-            f"""
-            <article class="wf-card" style="--d:{0.08 * (start + idx):.2f}s;">
-              <div class="wf-tag tag-news">热点商机</div>
-              <div class="wf-title">{html.escape(news.get('title', '行业热点'))}</div>
-              <div class="wf-meta">相关度 {score} 分 ｜ 类别：{html.escape(news.get('category', '资讯'))} ｜ 关键词：{html.escape(matched_kw)}</div>
-              <div class="wf-reason">机会解释：该热点与当前业务路径有直接连接，具备短期转化可能。</div>
-              <div class="wf-action">建议动作：{html.escape(action)}</div>
-            </article>
-            """
+            block_html(
+                f"""
+                <article class="wf-card" style="--d:{0.08 * (start + idx):.2f}s;">
+                  <div class="wf-tag tag-news">热点商机</div>
+                  <div class="wf-title">{html.escape(news.get('title', '行业热点'))}</div>
+                  <div class="wf-meta">相关度 {score} 分 ｜ 类别：{html.escape(news.get('category', '资讯'))} ｜ 关键词：{html.escape(matched_kw)}</div>
+                  <div class="wf-reason">机会解释：该热点与当前业务路径有直接连接，具备短期转化可能。</div>
+                  <div class="wf-action">建议动作：{html.escape(action)}</div>
+                </article>
+                """
+            )
         )
 
     if not cards:
@@ -754,47 +777,53 @@ def render_model_explainer(boss: dict, matched_news: list[dict]) -> None:
     with left_col:
         if network:
             st.markdown(
-                f"""
-                <div class="model-card">
-                  <div class="model-title">人脉建议</div>
-                  <div class="model-body">建议联系：{html.escape(network['name'])}（{html.escape(network['role'])}）<br>
-                  联系理由：{html.escape(network['reason'])}</div>
-                </div>
-                """,
+                block_html(
+                    f"""
+                    <div class="model-card">
+                      <div class="model-title">人脉建议</div>
+                      <div class="model-body">建议联系：{html.escape(network['name'])}（{html.escape(network['role'])}）<br>
+                      联系理由：{html.escape(network['reason'])}</div>
+                    </div>
+                    """
+                ),
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                """
-                <div class="model-card">
-                  <div class="model-title">人脉建议</div>
-                  <div class="model-body">当前画像缺少可联系人脉，建议先补充 3-5 位关键联系人用于后续提醒。</div>
-                </div>
-                """,
+                block_html(
+                    """
+                    <div class="model-card">
+                      <div class="model-title">人脉建议</div>
+                      <div class="model-body">当前画像缺少可联系人脉，建议先补充 3-5 位关键联系人用于后续提醒。</div>
+                    </div>
+                    """
+                ),
                 unsafe_allow_html=True,
             )
 
     with right_col:
         advice = "推进" if miro.get("advice") == "推进" else "观察"
         st.markdown(
-            f"""
-            <div class="model-card">
-              <div class="model-title">MiroFish 快速推演</div>
-              <div class="model-body">最高价值商机：{html.escape(top_news.get('title', '重点热点')[:36])}...<br>
-              主要风险：{html.escape(miro.get('risk', '市场波动'))}<br>
-              AI建议：{html.escape(advice)}</div>
-              <div class="model-metric">
-                <div class="metric-box">
-                  <div class="metric-name">时间窗口</div>
-                  <div class="metric-val">{html.escape(miro.get('window', '2-3个月'))}</div>
+            block_html(
+                f"""
+                <div class="model-card">
+                  <div class="model-title">MiroFish 快速推演</div>
+                  <div class="model-body">最高价值商机：{html.escape(top_news.get('title', '重点热点')[:36])}...<br>
+                  主要风险：{html.escape(miro.get('risk', '市场波动'))}<br>
+                  AI建议：{html.escape(advice)}</div>
+                  <div class="model-metric">
+                    <div class="metric-box">
+                      <div class="metric-name">时间窗口</div>
+                      <div class="metric-val">{html.escape(miro.get('window', '2-3个月'))}</div>
+                    </div>
+                    <div class="metric-box">
+                      <div class="metric-name">预估收益</div>
+                      <div class="metric-val">{html.escape(miro.get('revenue', '¥5万 - ¥15万'))}</div>
+                    </div>
+                  </div>
                 </div>
-                <div class="metric-box">
-                  <div class="metric-name">预估收益</div>
-                  <div class="metric-val">{html.escape(miro.get('revenue', '¥5万 - ¥15万'))}</div>
-                </div>
-              </div>
-            </div>
-            """,
+                """
+            ),
             unsafe_allow_html=True,
         )
 
@@ -803,7 +832,7 @@ inject_styles()
 
 with st.sidebar:
     st.markdown("## 🧭 AI商业参谋")
-    st.caption("视觉实验版 · 深海蓝/香槟金/青绿色")
+    st.caption("浅色旗舰版 · Apple风格信息设计")
     st.divider()
 
     boss_options = {f"{b['name']} · {b['industry']}": b for b in BOSSES}
