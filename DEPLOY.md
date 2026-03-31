@@ -16,6 +16,8 @@
 
 说明：
 - 本项目已配置好容器启动命令，无需手改。
+- 建议在 Render 开启持续在线（Always On）或等效保活策略，减少冷启动导致的首屏抖动。
+- 建议将健康检查路径固定为 `/_stcore/health`，便于平台探活与外部监控统一口径。
 - 如后续启用真实AI模式，请在 Render 的 Environment Variables 添加 `ANTHROPIC_API_KEY`。
 - 新闻与政策默认使用本土源（中国政府网政策页 + 百度新闻 RSS + 36氪/钛媒体 RSS），无需额外 key。
 - 活动默认使用本土活动源（活动行公开活动页），无需额外 key。
@@ -33,6 +35,25 @@ Render 环境变量填写示例（可选）：
 `EVENTBRITE_API_TOKEN=xxxxxxxx`
 
 `TICKETMASTER_API_KEY=xxxxxxxx`
+
+Render 稳定性参数建议（控制台配置）：
+
+- Health Check Path: `/_stcore/health`
+- Auto Deploy: 开启（主分支推送后自动发布）
+- Instance: 生产环境建议使用非休眠实例（避免冷启动）
+- 日志保留：开启请求日志，便于追踪 5xx 和超时峰值
+
+## CORS/OPTIONS 兼容建议（接第三方前端时）
+
+当前 Streamlit 应用本身并不直接暴露可自定义的 OPTIONS 路由。
+如果后续要被第三方前端跨域调用，建议在反向代理层（Nginx/Cloudflare/网关）补齐：
+
+- OPTIONS 预检返回 200/204
+- `Access-Control-Allow-Origin` 按白名单放行
+- `Access-Control-Allow-Methods` 覆盖 `GET, HEAD, OPTIONS`
+- `Access-Control-Allow-Headers` 覆盖前端实际请求头
+
+这样可避免浏览器预检阶段出现 405。
 
 ## 方案B：Streamlit Community Cloud
 
