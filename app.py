@@ -1936,6 +1936,20 @@ def inject_styles() -> None:
             line-height: 1.35;
         }
 
+        .wf-detail-link {
+            font-size: 0.86em;
+            font-family: "SF Mono", "Menlo", "Consolas", monospace;
+            font-weight: 600;
+            color: #0a66c2;
+            text-decoration: none;
+            margin-left: 0.32rem;
+            white-space: nowrap;
+        }
+
+        .wf-detail-link:hover {
+            text-decoration: underline;
+        }
+
         .wf-meta {
             color: #6b7280;
             font-size: 0.82rem;
@@ -1986,6 +2000,64 @@ def inject_styles() -> None:
             border: 1px solid rgba(10, 102, 194, 0.2);
             background: #f2f8ff;
             font-size: 0.8rem;
+        }
+
+        .wf-ai-tools {
+            margin-top: 0.36rem;
+            display: grid;
+            gap: 0.34rem;
+        }
+
+        .wf-ai-item {
+            border: 1px solid rgba(15, 63, 121, 0.14);
+            border-radius: 12px;
+            background: #f8fbff;
+            padding: 0.34rem 0.44rem;
+        }
+
+        .wf-ai-item summary {
+            cursor: pointer;
+            color: #0f3f79;
+            font-size: 0.84rem;
+            font-weight: 700;
+            list-style: none;
+        }
+
+        .wf-ai-item summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .wf-ai-content {
+            margin-top: 0.28rem;
+            color: #334155;
+            font-size: 0.84rem;
+            line-height: 1.45;
+        }
+
+        .goal-preview {
+            margin-top: 0.28rem;
+            border: 1px solid rgba(15, 63, 121, 0.16);
+            border-radius: 14px;
+            background: linear-gradient(180deg, #ffffff, #f8fbff);
+            padding: 0.46rem 0.54rem;
+        }
+
+        .goal-label {
+            color: #0f3f79;
+            font-size: 0.78rem;
+            font-weight: 700;
+            margin-top: 0.2rem;
+        }
+
+        .goal-label:first-child {
+            margin-top: 0;
+        }
+
+        .goal-line {
+            color: #334155;
+            font-size: 0.86rem;
+            line-height: 1.45;
+            margin-top: 0.12rem;
         }
 
         .model-grid {
@@ -2601,17 +2673,85 @@ def _generate_smart_goal(
     if event_name and normalized_style != "稳健落地" and rng.random() > 0.45:
         headline = f"借势「{event_name[:20]}」抢占关键窗口"
 
-    if normalized_style == "稳健落地":
-        goal = f"{headline}。落地动作：{action}。"
-    elif normalized_style == "高势能冲刺":
-        goal = f"{headline}。冲刺目标：{stretch}。立即动作：{action}。"
-    else:
-        goal = f"{headline}。落地动作：{action}；冲刺目标：{stretch}。"
+    goal_lines: list[str] = ["目标：", headline, "落地动作：", action]
+    if normalized_style != "稳健落地":
+        goal_lines.extend(["冲刺目标：", stretch])
 
     if goal_preference:
-        goal += f" 优先偏好：{goal_preference}。"
+        goal_lines.extend(["目标偏好：", goal_preference])
 
-    return goal
+    return "\n".join(goal_lines)
+
+
+def _generate_distinct_smart_goal(
+    boss: dict,
+    news_items: list[dict],
+    events: list[dict],
+    base_seed: int,
+    style_mode: str,
+    previous_goal: str = "",
+    force_new: bool = False,
+) -> tuple[str, int]:
+    offsets = [0, 11, 23, 37, 53, 71, 97, 131]
+    last_goal = str(previous_goal or "").strip()
+
+    fallback_goal = ""
+    fallback_seed = base_seed
+
+    for offset in offsets:
+        candidate_seed = base_seed + offset
+        candidate_goal = _generate_smart_goal(
+            boss,
+            news_items,
+            events,
+            seed=candidate_seed,
+            style_mode=style_mode,
+        )
+        if not force_new:
+            return candidate_goal, candidate_seed
+
+        if not last_goal or candidate_goal.strip() != last_goal:
+            return candidate_goal, candidate_seed
+
+        fallback_goal = candidate_goal
+        fallback_seed = candidate_seed
+
+    if fallback_goal:
+        focus_tags = [
+            "先拿下决策人会面",
+            "先拿到可展示案例",
+            "先拿到首个试点客户",
+            "先跑通最小成交闭环",
+        ]
+        tag = focus_tags[(base_seed + len(last_goal)) % len(focus_tags)]
+        goal_lines = [line for line in fallback_goal.splitlines() if line.strip()]
+        goal_lines.extend(["本次刷新侧重点：", tag])
+        return "\n".join(goal_lines), fallback_seed + 1
+
+    return _generate_smart_goal(boss, news_items, events, seed=base_seed, style_mode=style_mode), base_seed
+
+
+def _goal_headline_text(goal_text: str) -> str:
+    lines = [line.strip() for line in str(goal_text or "").splitlines() if line.strip()]
+    for line in lines:
+        if line.endswith("："):
+            continue
+        return _normalize_event_text(line, max_len=32)
+    return _normalize_event_text(str(goal_text or "今日目标"), max_len=32)
+
+
+def _goal_preview_html(goal_text: str) -> str:
+    lines = [line.strip() for line in str(goal_text or "").splitlines() if line.strip()]
+    if not lines:
+        return '<div class="goal-preview"><div class="goal-line">暂无目标</div></div>'
+
+    chunks: list[str] = []
+    for line in lines:
+        if line.endswith("："):
+            chunks.append(f'<div class="goal-label">{html.escape(line)}</div>')
+        else:
+            chunks.append(f'<div class="goal-line">{html.escape(line)}</div>')
+    return '<div class="goal-preview">' + "".join(chunks) + "</div>"
 
 
 def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4) -> list[dict]:
@@ -3186,6 +3326,49 @@ def _event_detail_url(event: dict) -> str:
     return f"https://www.baidu.com/s?wd={quote_plus(query)}"
 
 
+def _news_detail_url(news: dict) -> str:
+    raw_link = str(news.get("link") or news.get("url") or "").strip()
+    if raw_link:
+        return raw_link
+
+    title = _normalize_event_text(str(news.get("title", "政策详情")), max_len=72)
+    category = _normalize_event_text(str(news.get("category", "政策")), max_len=16)
+    query = " ".join(part for part in [title, category, "政策", "解读"] if part)
+    return f"https://www.baidu.com/s?wd={quote_plus(query)}"
+
+
+def _to_html_multiline(text: str) -> str:
+    return html.escape(str(text or "")).replace("\n", "<br>")
+
+
+def _build_policy_action_texts(news: dict) -> dict:
+    title = _normalize_event_text(str(news.get("title", "相关政策")), max_len=56)
+    category = str(news.get("category", "政策")).strip() or "政策"
+    matched = "、".join(news.get("matched", [])[:2]) or category
+
+    summary = (
+        f"1) 政策核心：{title}。\n"
+        f"2) 对你最相关：重点关注{matched}方向的扶持/监管变化。\n"
+        "3) 本周建议：先确认适用条件，再准备申报或业务调整清单。"
+    )
+    moments_copy = (
+        f"【{category}速递】{title}\n"
+        f"和我们当前的{matched}方向高度相关，窗口期很短。\n"
+        "这周会先做适配评估，欢迎同行交流。"
+    )
+    friend_note = (
+        f"给你同步一条可能有用的信息：{title}。\n"
+        f"我看和你最近在做的{matched}比较相关，\n"
+        "要不要我整理一版可执行清单发你？"
+    )
+
+    return {
+        "summary": summary,
+        "moments": moments_copy,
+        "friend": friend_note,
+    }
+
+
 def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_geo_profile: dict | None = None) -> None:
     has_events = bool(matched_events)
     has_news = bool(matched_news)
@@ -3223,7 +3406,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                     f"""
                     <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
                                             <div class="wf-tag tag-event">什么值得做</div>
-                                            <div class="wf-title">{html.escape(event.get('title', '商业活动'))} <a href="{html.escape(event_url)}" target="_blank" rel="noopener noreferrer">详见活动页</a></div>
+                                            <div class="wf-title">{html.escape(event.get('title', '商业活动'))}<a class="wf-detail-link" href="{html.escape(event_url)}" target="_blank" rel="noopener noreferrer">详见活动页</a></div>
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
                                             {deadline_line}
@@ -3248,15 +3431,31 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
             score = int(news.get("score", 0))
             matched_kw = "、".join(news.get("matched", [])[:2]) or news.get("category", "资讯")
             action = get_action(news.get("category", "政策"))
+            news_url = _news_detail_url(news)
+            action_texts = _build_policy_action_texts(news)
             news_cards.append(
                 block_html(
                     f"""
                     <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
                       <div class="wf-tag tag-news">热点商机</div>
-                      <div class="wf-title">{html.escape(news.get('title', '行业热点'))}</div>
+                      <div class="wf-title">{html.escape(news.get('title', '行业热点'))}<a class="wf-detail-link" href="{html.escape(news_url)}" target="_blank" rel="noopener noreferrer">政策详情页</a></div>
                       <div class="wf-meta">相关度 {score} 分 ｜ 类别：{html.escape(news.get('category', '资讯'))} ｜ 关键词：{html.escape(matched_kw)}</div>
                       <div class="wf-reason">机会解释：该热点与当前业务路径有直接连接，具备短期转化可能。</div>
-                                            <div class="wf-action">{html.escape(action)}</div>
+                      <div class="wf-action">{html.escape(action)}</div>
+                      <div class="wf-ai-tools">
+                        <details class="wf-ai-item">
+                          <summary>一键生成政策细则摘要</summary>
+                          <div class="wf-ai-content">{_to_html_multiline(action_texts['summary'])}</div>
+                        </details>
+                        <details class="wf-ai-item">
+                          <summary>一键生成朋友圈文案</summary>
+                          <div class="wf-ai-content">{_to_html_multiline(action_texts['moments'])}</div>
+                        </details>
+                        <details class="wf-ai-item">
+                          <summary>一键生成好友通知文案</summary>
+                          <div class="wf-ai-content">{_to_html_multiline(action_texts['friend'])}</div>
+                        </details>
+                      </div>
                     </article>
                     """
                 )
@@ -3342,6 +3541,8 @@ if "smart_goal_seed" not in st.session_state:
     st.session_state["smart_goal_seed"] = int(time.time())
 if "live_context_cache" not in st.session_state:
     st.session_state["live_context_cache"] = {}
+if "last_auto_goal" not in st.session_state:
+    st.session_state["last_auto_goal"] = ""
 
 with st.sidebar:
     st.markdown("## 🧭 AI商业参谋")
@@ -3383,7 +3584,7 @@ with st.sidebar:
         st.caption("目标：可以手动输入或智能推荐筛选")
     refresh_goal = st.button("刷新智能目标", use_container_width=True)
     if refresh_goal:
-        st.session_state["smart_goal_seed"] = int(st.session_state.get("smart_goal_seed", 0)) + 1
+        st.session_state["smart_goal_seed"] = int(st.session_state.get("smart_goal_seed", 0)) + 17
 
     selected_boss = dict(selected_boss_base)
     if goal_preference_input.strip() and goal_input_mode != "手动输入":
@@ -3468,7 +3669,7 @@ if resolved_city:
     selected_boss["city"] = resolved_city
 
 hero_city_display = resolved_city or "IP识别或手动输入"
-hero_goal_hint = selected_boss.get("current_goal", "")
+hero_goal_hint = _goal_headline_text(selected_boss.get("current_goal", ""))
 
 mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动 + IP路程硬过滤；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
@@ -3491,20 +3692,24 @@ all_news = live_news + extra_news
 industry_event_pool = _build_industry_event_pool(selected_boss, live_events, top_n=max(12, len(live_events) or 12), min_secondary=2)
 industry_news_pool = _build_industry_news_pool(selected_boss, all_news, top_n=max(24, len(all_news) or 24), min_secondary=2)
 
-smart_goal_text = _generate_smart_goal(
+smart_goal_text, goal_seed_used = _generate_distinct_smart_goal(
     selected_boss,
     industry_news_pool or all_news,
     industry_event_pool or live_events,
-    seed=int(st.session_state.get("smart_goal_seed", 0)),
+    base_seed=int(st.session_state.get("smart_goal_seed", 0)),
     style_mode=goal_style_mode,
+    previous_goal=str(st.session_state.get("last_auto_goal", "")),
+    force_new=bool(refresh_goal),
 )
 if goal_input_mode == "手动输入" and manual_goal_input.strip():
     selected_boss["current_goal"] = manual_goal_input.strip()
 else:
     selected_boss["current_goal"] = smart_goal_text
-    goal_preview.caption("智能目标：" + smart_goal_text)
+    st.session_state["smart_goal_seed"] = int(goal_seed_used)
+    st.session_state["last_auto_goal"] = smart_goal_text
+    goal_preview.markdown(_goal_preview_html(smart_goal_text), unsafe_allow_html=True)
 
-hero_goal_hint = selected_boss.get("current_goal", "")
+hero_goal_hint = _goal_headline_text(selected_boss.get("current_goal", ""))
 
 matched_events = match_events_for_boss(selected_boss, industry_event_pool or live_events)
 matched_news = match_news_for_boss(selected_boss, industry_news_pool or all_news)
@@ -3560,4 +3765,4 @@ render_timeline(actions)
 render_why_cards(matched_events, matched_news, user_geo_profile=user_geo_profile)
 render_model_explainer(selected_boss, matched_news)
 
-st.markdown("<div class='footer-note'>AI商业参谋 · 高保真UI预览版 ｜ 信息顺序：做什么 → 为什么做 → 模型解释</div>", unsafe_allow_html=True)
+st.markdown("<div class='footer-note'>AI商业参谋 版权所有 盗版必究</div>", unsafe_allow_html=True)
