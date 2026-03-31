@@ -3409,6 +3409,7 @@ def render_timeline(actions: list[dict]) -> None:
         {
             "time": str(item.get("time", "今天")),
             "priority": str(item.get("priority", "中")),
+            "type": str(item.get("type", "")),
             "title": str(item.get("title", "执行重点任务")),
             "reason": str(item.get("reason", "围绕今日目标推进。")),
         }
@@ -3465,10 +3466,27 @@ def render_timeline(actions: list[dict]) -> None:
             align-items:center;
             margin-bottom:4px;
         }}
+        .gesture-meta-left {{
+            display:flex;
+            align-items:center;
+            gap:6px;
+            min-width:0;
+        }}
         .gesture-time {{
             color:#0f3f79;
             font-weight:700;
             font-size:15px;
+        }}
+        .gesture-type {{
+            display:inline-flex;
+            align-items:center;
+            padding:1px 6px;
+            border-radius:999px;
+            font-size:11px;
+            font-weight:700;
+            color:#155e75;
+            background:rgba(21, 94, 117, 0.1);
+            border:1px solid rgba(21, 94, 117, 0.2);
         }}
         .gesture-title {{
             color:#1f2937;
@@ -3485,6 +3503,8 @@ def render_timeline(actions: list[dict]) -> None:
             font-size:12px;
             font-weight:700;
             padding:2px 8px;
+            cursor:pointer;
+            background:#fff;
         }}
         .p-high {{ color:#b42318; background:#ffe6e2; border:1px solid #ffc3bb; }}
         .p-mid {{ color:#8d5f10; background:#fff4dd; border:1px solid #f4deb0; }}
@@ -3495,7 +3515,7 @@ def render_timeline(actions: list[dict]) -> None:
             margin-top:2px;
         }}
     </style>
-    <div class="gesture-tip">手势操作：右滑新增日程，左滑删除日程，长按切换优先级（高/中/低）。</div>
+    <div class="gesture-tip">手势操作：右滑新增日程（可填时间与事项），左滑删除日程，点击“高/中/低优先级”切换优先级。</div>
     <div id="gesture-timeline" class="gesture-wrap"></div>
     <div id="gesture-hint" class="gesture-hint"></div>
     <script>
@@ -3505,6 +3525,13 @@ def render_timeline(actions: list[dict]) -> None:
 
         const priClass = (p) => p === '高' ? 'p-high' : (p === '低' ? 'p-low' : 'p-mid');
         const esc = (s) => String(s || '').replace(/[&<>"']/g, (m) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[m]));
+        const typeRules = [
+            {{ type: '截止日', keywords: ['截止', 'ddl', '到期', '交付', '报名截止', '申报截止', '递交'] }},
+            {{ type: '活动', keywords: ['活动', '展会', '会展', '论坛', '峰会', '路演', '沙龙', '大会'] }},
+            {{ type: '沟通', keywords: ['联系', '沟通', '拜访', '约见', '电话', '微信', '跟进', '对接'] }},
+            {{ type: '材料', keywords: ['材料', '文案', '方案', '报价', '合同', '清单', 'ppt', '计划书'] }},
+            {{ type: '复盘', keywords: ['复盘', '测算', '分析', '报表', '预算', '现金流', '评估'] }},
+        ];
 
         function showHint(text) {{
             hint.textContent = text;
@@ -3519,62 +3546,142 @@ def render_timeline(actions: list[dict]) -> None:
             return '高';
         }}
 
+        function normalizeTimeInput(raw) {{
+            const text = String(raw || '').trim();
+            if (!text) return '今天';
+
+            const hm = text.match(/^([01]?[0-9]|2[0-3]):([0-5][0-9])$/);
+            if (hm) return `${{hm[1].padStart(2, '0')}}:${{hm[2]}}`;
+
+            return text.slice(0, 18);
+        }}
+
+        function inferScheduleType(text) {{
+            const content = String(text || '').toLowerCase();
+            for (const rule of typeRules) {{
+                if (rule.keywords.some((kw) => content.includes(kw.toLowerCase()))) {{
+                    return rule.type;
+                }}
+            }}
+            return '推进';
+        }}
+
+        function inferPriorityByType(taskType) {{
+            if (taskType === '截止日') return '高';
+            if (taskType === '材料') return '高';
+            if (taskType === '活动') return '中';
+            if (taskType === '沟通') return '中';
+            if (taskType === '复盘') return '中';
+            return '中';
+        }}
+
+        function buildReasonByType(taskType) {{
+            if (taskType === '截止日') return '该事项属于时间敏感任务，建议先锁定完成节点。';
+            if (taskType === '活动') return '该事项属于机会触达动作，建议明确对象并安排会后跟进。';
+            if (taskType === '沟通') return '该事项属于关系推进动作，建议先定义沟通目标与下一步承诺。';
+            if (taskType === '材料') return '该事项属于成交准备动作，建议同步整理资料与关键数字。';
+            if (taskType === '复盘') return '该事项属于数据校准动作，建议输出结论并回写到明日计划。';
+            return '该事项已加入今日清单，建议定义可验收结果。';
+        }}
+
+        function estimateFrameHeight() {{
+            const base = 122;
+            const perItem = 112;
+            return Math.max(280, Math.min(880, base + items.length * perItem));
+        }}
+
+        function syncFrameHeight() {{
+            const target = estimateFrameHeight();
+            try {{
+                window.parent.postMessage(
+                    {{ isStreamlitMessage: true, type: 'streamlit:setFrameHeight', height: target }},
+                    '*'
+                );
+            }} catch (e) {{}}
+
+            try {{
+                if (window.frameElement) {{
+                    window.frameElement.style.height = `${{target}}px`;
+                }}
+            }} catch (e) {{}}
+        }}
+
+        function askForNewSchedule(baseTime) {{
+            const timeText = window.prompt('新增日程时间（例如 09:30 / 今天下午 / 明天 10:00）', baseTime || '今天');
+            if (timeText === null) return null;
+
+            const taskText = window.prompt('新增事项（例如 跟进张总确认联合活动）', '');
+            if (taskText === null) return null;
+
+            const task = String(taskText || '').trim();
+            if (!task) {{
+                showHint('事项不能为空，已取消新增');
+                return null;
+            }}
+
+            return {{
+                time: normalizeTimeInput(timeText),
+                task,
+            }};
+        }}
+
         function render() {{
             root.innerHTML = '';
             items.forEach((item, idx) => {{
+                const itemType = item.type || inferScheduleType(`${{item.title || ''}} ${{item.reason || ''}}`);
                 const card = document.createElement('div');
                 card.className = 'gesture-item';
                 card.innerHTML = `
                     <div class="gesture-top">
-                        <span class="gesture-time">${{esc(item.time)}}</span>
-                        <span class="gesture-pri ${{priClass(item.priority)}}">${{esc(item.priority)}}优先级</span>
+                        <div class="gesture-meta-left">
+                            <span class="gesture-time">${{esc(item.time)}}</span>
+                            <span class="gesture-type">${{esc(itemType)}}</span>
+                        </div>
+                        <button type="button" class="gesture-pri ${{priClass(item.priority)}}" title="点击切换优先级">${{esc(item.priority)}}优先级</button>
                     </div>
                     <div class="gesture-title">${{esc(item.title)}}</div>
                     <div class="gesture-note">${{esc(item.reason)}}</div>
                 `;
 
+                const priorityBadge = card.querySelector('.gesture-pri');
+                if (priorityBadge) {{
+                    priorityBadge.addEventListener('click', (event) => {{
+                        event.preventDefault();
+                        event.stopPropagation();
+                        items[idx].priority = cyclePriority(items[idx].priority || '中');
+                        render();
+                        showHint('已切换优先级');
+                    }});
+                }}
+
                 let startX = 0;
-                let moved = false;
-                let longPressTimer = null;
 
                 card.addEventListener('touchstart', (e) => {{
                     startX = e.touches[0].clientX;
-                    moved = false;
-                    longPressTimer = setTimeout(() => {{
-                        items[idx].priority = cyclePriority(items[idx].priority || '中');
-                        render();
-                        showHint('已长按调整优先级');
-                    }}, 560);
-                }}, {{passive:true}});
-
-                card.addEventListener('touchmove', (e) => {{
-                    const delta = e.touches[0].clientX - startX;
-                    if (Math.abs(delta) > 14) moved = true;
-                    if (moved && longPressTimer) {{
-                        clearTimeout(longPressTimer);
-                        longPressTimer = null;
-                    }}
                 }}, {{passive:true}});
 
                 card.addEventListener('touchend', (e) => {{
-                    if (longPressTimer) {{
-                        clearTimeout(longPressTimer);
-                        longPressTimer = null;
-                    }}
-
                     const endX = (e.changedTouches && e.changedTouches[0]) ? e.changedTouches[0].clientX : startX;
                     const deltaX = endX - startX;
 
                     if (deltaX > 72) {{
+                        const draft = askForNewSchedule(items[idx].time || '今天');
+                        if (!draft) {{
+                            showHint('已取消新增');
+                            return;
+                        }}
+
+                        const taskType = inferScheduleType(draft.task);
                         const newItem = {{
-                            time: '今天',
-                            priority: '中',
-                            title: '新增日程（右滑创建）',
-                            reason: '可继续编辑：补充对象、时间和目标结果。',
+                            time: draft.time,
+                            priority: inferPriorityByType(taskType),
+                            type: taskType,
+                            title: `${{taskType}}：${{draft.task}}`,
+                            reason: buildReasonByType(taskType),
                         }};
                         items.splice(idx + 1, 0, newItem);
                         render();
-                        showHint('已右滑新增日程');
+                        showHint(`已新增日程（${{taskType}}）`);
                     }} else if (deltaX < -72) {{
                         if (items.length > 1) {{
                             items.splice(idx, 1);
@@ -3586,21 +3693,18 @@ def render_timeline(actions: list[dict]) -> None:
                     }}
                 }}, {{passive:true}});
 
-                card.addEventListener('dblclick', () => {{
-                    items[idx].priority = cyclePriority(items[idx].priority || '中');
-                    render();
-                    showHint('已切换优先级');
-                }});
-
                 root.appendChild(card);
             }});
+
+            syncFrameHeight();
         }}
 
+        window.addEventListener('resize', () => syncFrameHeight());
         render();
     </script>
     """
-    height = max(320, min(760, 160 + len(actions) * 116))
-    components.html(html_block, height=height, scrolling=True)
+    height = max(280, min(880, 122 + len(actions) * 112))
+    components.html(html_block, height=height, scrolling=False)
 
 
 def _safe_target_city_name(event: dict) -> str:
