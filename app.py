@@ -540,6 +540,7 @@ CITY_12306_STATION_CODES = {
 }
 
 MAX_TRAVEL_HOURS = 2.0
+EXTENDED_EVENT_TRAVEL_BUFFER_HOURS = 1.0
 TIME_VALUE_PER_HOUR_RMB = 220
 
 
@@ -1005,28 +1006,44 @@ def _attach_online_trip_fields(event: dict) -> dict:
     return event_copy
 
 
-def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_TRAVEL_HOURS) -> tuple[list[dict], dict, list[str]]:
+def apply_ip_proximity_filter(
+    events: list[dict],
+    max_travel_hours: float = MAX_TRAVEL_HOURS,
+    preferred_city: str = "",
+) -> tuple[list[dict], dict, list[str]]:
     warnings: list[str] = []
     if not events:
         return [], {"enabled": False}, warnings
 
     client_ip = _extract_client_ip()
-    if not client_ip:
-        warnings.append("未识别到用户IP，暂未启用1-2小时路程硬过滤")
-        return [{**event} for event in events], {"enabled": False}, warnings
+    geo = _lookup_ip_geo(client_ip) if client_ip else {"ok": False}
+    preferred_city_norm = _canonical_city_name(preferred_city)
 
-    geo = _lookup_ip_geo(client_ip)
-    if not geo.get("ok"):
-        warnings.append("用户IP定位失败，暂未启用1-2小时路程硬过滤")
-        return [{**event} for event in events], {"enabled": False, "ip": client_ip}, warnings
+    anchor_mode = "ip"
+    anchor_city = ""
+    if preferred_city_norm and preferred_city_norm in MAJOR_CITY_COORDS:
+        anchor_mode = "manual_city"
+        anchor_city = preferred_city_norm
+        user_lat, user_lon = MAJOR_CITY_COORDS[preferred_city_norm]
+    else:
+        if not client_ip:
+            warnings.append("未识别到用户IP，暂未启用1-2小时路程硬过滤")
+            return [{**event} for event in events], {"enabled": False}, warnings
 
-    user_lat = float(geo.get("lat"))
-    user_lon = float(geo.get("lon"))
+        if not geo.get("ok"):
+            warnings.append("用户IP定位失败，暂未启用1-2小时路程硬过滤")
+            return [{**event} for event in events], {"enabled": False, "ip": client_ip}, warnings
+
+        user_lat = float(geo.get("lat"))
+        user_lon = float(geo.get("lon"))
+        anchor_city = _canonical_city_name(str(geo.get("city", "")))
 
     city_scope = _build_reachable_city_scope(user_lat, user_lon, max_travel_hours=max_travel_hours)
     allowed_cities = {item["city"] for item in city_scope}
+    extended_limit = max_travel_hours + EXTENDED_EVENT_TRAVEL_BUFFER_HOURS
 
     filtered: list[dict] = []
+    extended_candidates: list[dict] = []
     far_events: list[dict] = []
     unknown_offline_count = 0
 
@@ -1042,7 +1059,12 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
             unknown_offline_count += 1
             continue
 
-        city_lat, city_lon = MAJOR_CITY_COORDS[event_city]
+        coords = MAJOR_CITY_COORDS.get(event_city)
+        if not coords:
+            unknown_offline_count += 1
+            continue
+
+        city_lat, city_lon = coords
         distance = _haversine_km(user_lat, user_lon, city_lat, city_lon)
         trip = _estimate_trip(distance)
 
@@ -1057,6 +1079,9 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
 
         if event_city in allowed_cities and trip["travel_hours"] <= max_travel_hours:
             filtered.append(event_copy)
+        elif trip["travel_hours"] <= extended_limit:
+            event_copy["extended_reach"] = True
+            extended_candidates.append(event_copy)
         else:
             far_events.append(event_copy)
 
@@ -1070,6 +1095,22 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
             f"最近一项单程约 {nearest.get('travel_hours', 0):.1f} 小时，交通约 ¥{nearest.get('transport_cost_rmb', 0):.0f}"
         )
 
+    if not filtered and extended_candidates:
+        extended_candidates.sort(
+            key=lambda item: (
+                0 if item.get("value") == "高" else 1,
+                float(item.get("travel_hours", 99) or 99),
+            )
+        )
+        picked = {**extended_candidates[0]}
+        detail = str(picked.get("source_detail", "本土活动源")).strip()
+        if "稍远可达" not in detail:
+            picked["source_detail"] = f"{detail} · 稍远可达"
+        filtered.append(picked)
+        warnings.append(
+            f"已启用保底补位：补充1条单程≤{extended_limit:.1f}小时的活动（优先行业一致与高价值）"
+        )
+
     if not filtered:
         warnings.append("IP硬过滤后暂无可达活动，建议优先线上活动或放宽城市圈")
 
@@ -1078,7 +1119,11 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
     profile = {
         "enabled": True,
         "ip": client_ip,
-        "city": normalized_city or geo.get("city", ""),
+        "city": anchor_city or normalized_city or geo.get("city", ""),
+        "anchor_mode": anchor_mode,
+        "anchor_city": anchor_city or normalized_city or geo.get("city", ""),
+        "input_city": preferred_city_norm,
+        "ip_city": normalized_city or geo.get("city", ""),
         "region": geo.get("region", ""),
         "country": geo.get("country", ""),
         "provider": geo.get("provider", ""),
@@ -1302,6 +1347,60 @@ def _build_authoritative_policy_portal_news(max_items: int = 20) -> list[dict]:
     return news
 
 
+def _build_city_policy_news(preferred_city: str, max_items: int = 6) -> list[dict]:
+    city = _canonical_city_name(preferred_city)
+    if not city:
+        return []
+
+    direct_portals = [
+        (portal_name, portal_url)
+        for portal_name, portal_url in AUTHORITATIVE_POLICY_SOURCE_PORTALS
+        if city in portal_name and "政府" in portal_name
+    ]
+    fallback_portals = [
+        (portal_name, portal_url)
+        for portal_name, portal_url in AUTHORITATIVE_POLICY_SOURCE_PORTALS
+        if city in portal_name
+    ]
+
+    portal_candidates = direct_portals or fallback_portals
+    if not portal_candidates:
+        return []
+
+    seed = int(datetime.now().strftime("%Y%m%d%H"))
+    start = seed % len(portal_candidates)
+    ordered = [portal_candidates[(start + idx) % len(portal_candidates)] for idx in range(len(portal_candidates))]
+
+    news: list[dict] = []
+    seen_titles = set()
+    for portal_name, portal_url in ordered[:3]:
+        items = _extract_policy_items_from_portal(portal_name, portal_url, max_items=2)
+        for item in items:
+            title = str(item.get("title", "")).strip()
+            if not title:
+                continue
+
+            title_key = re.sub(r"\s+", " ", title.lower()).strip()
+            if title_key in seen_titles:
+                continue
+            seen_titles.add(title_key)
+
+            news.append(
+                {
+                    "id": f"R{len(news) + 1:02d}",
+                    "title": title,
+                    "category": "政策",
+                    "source": f"{portal_name}（{city}同城）",
+                    "published": str(item.get("published", "")),
+                    "url": str(item.get("link", "")),
+                }
+            )
+            if len(news) >= max_items:
+                return news
+
+    return news
+
+
 def _build_google_news_fallback(max_items: int = 16) -> list[dict]:
     seen_titles = set()
     news: list[dict] = []
@@ -1490,15 +1589,17 @@ def _build_local_news(max_items: int = 24) -> list[dict]:
     return news
 
 
-def _build_live_news(max_items: int = 24) -> list[dict]:
+def _build_live_news(max_items: int = 24, preferred_city: str = "") -> list[dict]:
+    preferred_city_norm = _canonical_city_name(preferred_city)
     policy_quota = min(max_items, max(6, max_items // 3))
+    city_policy_news = _build_city_policy_news(preferred_city_norm, max_items=min(6, max(2, max_items // 4)))
     policy_news = _build_policy_only_news(max_items=policy_quota)
     local_news = _build_local_news(max_items=max_items * 2)
 
     merged: list[dict] = []
     seen_titles = set()
 
-    for batch in [policy_news, local_news]:
+    for batch in [city_policy_news, policy_news, local_news]:
         for item in batch:
             title = item.get("title", "").strip()
             if not title or title in seen_titles:
@@ -1509,6 +1610,17 @@ def _build_live_news(max_items: int = 24) -> list[dict]:
                 break
         if len(merged) >= max_items:
             break
+
+    if preferred_city_norm:
+        city_hits: list[dict] = []
+        others: list[dict] = []
+        for item in merged:
+            text = f"{item.get('title', '')} {item.get('source', '')}"
+            if preferred_city_norm in text:
+                city_hits.append(item)
+            else:
+                others.append(item)
+        merged = city_hits + others
 
     for i, item in enumerate(merged[:max_items], 1):
         item["id"] = f"R{i:02d}"
@@ -2558,7 +2670,7 @@ def get_realtime_feeds(refresh_bucket: int, preferred_city: str = "") -> tuple[l
     preferred_city = _canonical_city_name(preferred_city)
     warnings = []
 
-    live_news = _build_live_news(max_items=24)
+    live_news = _build_live_news(max_items=24, preferred_city=preferred_city)
     if not live_news:
         live_news = DEFAULT_NEWS.copy()
         warnings.append("新闻源暂不可用，已自动回退到内置热点")
@@ -3891,6 +4003,56 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
     return selected[:top_n]
 
 
+def _minimum_industry_consistent_events(boss: dict, events: list[dict], top_n: int = 1) -> list[dict]:
+    deduped: list[dict] = []
+    seen_titles = set()
+    for event in events or []:
+        key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
+        if not key or key in seen_titles:
+            continue
+        seen_titles.add(key)
+        deduped.append(event)
+
+    event_prefs = _infer_boss_event_preferences(boss)
+    scored: list[tuple[int, int, int, tuple[int, int, int], dict]] = []
+
+    for event in deduped:
+        relevance_score, matched = _event_relevance_score(boss, event)
+        if relevance_score < 0:
+            continue
+
+        travel_hours = float(event.get("travel_hours", 99) or 99)
+        if (not _is_online_event(event)) and travel_hours > (MAX_TRAVEL_HOURS + EXTENDED_EVENT_TRAVEL_BUFFER_HOURS):
+            continue
+
+        event_industries = [str(ind).lower() for ind in event.get("target_industries", [])]
+        industry_fit = 0
+        for pref in event_prefs:
+            if any(pref in ind or ind in pref for ind in event_industries):
+                industry_fit = 1
+                break
+
+        tier = _event_relevance_tier(boss, event)
+        base_floor = 34 if industry_fit else 26
+        event_copy = {
+            **event,
+            "score": min(92, max(int(event.get("score", 0) or 0), int(relevance_score), base_floor if tier <= 0 else 0)),
+            "matched_keywords": event.get("matched_keywords") or (matched[:3] if matched else [boss.get("industry", "行业相关")[:8]]),
+        }
+        if event_copy.get("extended_reach"):
+            detail = str(event_copy.get("source_detail", "本土活动源")).strip()
+            if "稍远可达" not in detail:
+                event_copy["source_detail"] = f"{detail} · 稍远可达"
+
+        scored.append((industry_fit, tier, int(event_copy["score"]), _event_rank_key(event_copy), event_copy))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda item: (item[0], item[1], item[2], item[3]), reverse=True)
+    return [item[4] for item in scored[:top_n]]
+
+
 def _ensure_exhibition_event_visibility(
     boss: dict,
     matched_events: list[dict],
@@ -4547,9 +4709,11 @@ def render_timeline(actions: list[dict]) -> None:
         }}
 
         function estimateFrameHeight() {{
-            const base = 122;
-            const perItem = 112;
-            return Math.max(280, Math.min(880, base + items.length * perItem));
+            const base = 96;
+            const perItem = 102;
+            const minHeight = 210;
+            const maxHeight = 1800;
+            return Math.max(minHeight, Math.min(maxHeight, base + Math.max(1, items.length) * perItem));
         }}
 
         function syncFrameHeight() {{
@@ -4669,7 +4833,7 @@ def render_timeline(actions: list[dict]) -> None:
         render();
     </script>
     """
-    height = max(280, min(880, 122 + len(actions) * 112))
+    height = max(210, min(1800, 96 + max(1, len(actions)) * 102))
     components.html(html_block, height=height, scrolling=False)
 
 
@@ -5273,6 +5437,7 @@ can_reuse_live_context = bool(
 if can_reuse_live_context:
     live_news = [{**item} for item in (live_cache.get("live_news") or [])]
     live_events = [{**item} for item in (live_cache.get("live_events") or [])]
+    live_events_raw = [{**item} for item in (live_cache.get("live_events_raw") or live_events)]
     live_updated_at = str(live_cache.get("live_updated_at", ""))
     live_warnings = list(live_cache.get("live_warnings") or [])
     user_geo_profile = dict(live_cache.get("user_geo_profile") or {"enabled": False})
@@ -5284,7 +5449,11 @@ else:
     )
     live_warnings = list(live_warnings_raw)
 
-    live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(live_events_raw, max_travel_hours=MAX_TRAVEL_HOURS)
+    live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(
+        live_events_raw,
+        max_travel_hours=MAX_TRAVEL_HOURS,
+        preferred_city=preferred_fetch_city,
+    )
     if geo_warnings:
         live_warnings.extend(geo_warnings)
 
@@ -5293,6 +5462,7 @@ else:
         "refresh_bucket": refresh_bucket,
         "live_news": [{**item} for item in live_news],
         "live_events": [{**item} for item in live_events],
+        "live_events_raw": [{**item} for item in live_events_raw],
         "live_updated_at": live_updated_at,
         "live_warnings": list(live_warnings),
         "user_geo_profile": dict(user_geo_profile),
@@ -5300,16 +5470,24 @@ else:
     }
 
 if user_geo_profile.get("enabled"):
-    city = _canonical_city_name(user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "") or "未知城市"
+    city = _canonical_city_name(user_geo_profile.get("anchor_city") or user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "") or "未知城市"
     region = user_geo_profile.get("region", "")
-    geo_caption.caption(f"IP定位：{city}{(' · ' + region) if region else ''}（已启用1-2小时硬过滤）")
+    if user_geo_profile.get("anchor_mode") == "manual_city":
+        ip_city = _canonical_city_name(str(user_geo_profile.get("ip_city", "")))
+        ip_note = f"；IP参考：{ip_city}" if ip_city else ""
+        geo_caption.caption(f"地址过滤：按{city}启用1-2小时硬过滤{ip_note}")
+    else:
+        geo_caption.caption(f"IP定位：{city}{(' · ' + region) if region else ''}（已启用1-2小时硬过滤）")
     scope_cities = user_geo_profile.get("scope_cities", [])
     if scope_cities:
         scope_caption.caption("可达大城市：" + "、".join(scope_cities[:6]))
     else:
         scope_caption.caption("可达大城市：暂无（仅保留线上活动）")
 else:
-    geo_caption.caption("IP定位：未识别（暂未启用1-2小时硬过滤）")
+    if _canonical_city_name(manual_city_input.strip()):
+        geo_caption.caption("地址过滤：手动城市暂不在可计算范围，已回退为全量活动")
+    else:
+        geo_caption.caption("IP定位：未识别（暂未启用1-2小时硬过滤）")
     scope_caption.caption("")
 
 manual_city = _canonical_city_name(manual_city_input.strip())
@@ -5322,7 +5500,7 @@ if resolved_city:
 hero_city_display = resolved_city or "IP识别或手动输入"
 hero_goal_hint = _goal_headline_text(selected_boss.get("current_goal", ""))
 
-mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动 + IP路程硬过滤；每 {refresh_minutes} 分钟自动刷新）")
+mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动；手动城市优先，未填则按IP进行路程过滤；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
 update_caption.caption(f"更新时间：{live_updated_at}")
 if live_warnings:
@@ -5395,6 +5573,16 @@ if not reuse_recommendation:
         matched_events = _fallback_event_candidates(selected_boss, industry_event_pool or live_events, top_n=3)
         live_warnings.append("活动严格匹配结果为空，已启用行业相关宽松推荐")
 
+    if not matched_events:
+        guaranteed_industry_events = _minimum_industry_consistent_events(
+            selected_boss,
+            industry_event_pool or live_events,
+            top_n=1,
+        )
+        if guaranteed_industry_events:
+            matched_events = guaranteed_industry_events
+            live_warnings.append("已启用活动保底：至少展示1条行业一致活动（可接受稍远距离）")
+
     if not matched_news and (industry_news_pool or all_news):
         matched_news = _fallback_news_candidates(selected_boss, industry_news_pool or all_news, top_n=4)
         live_warnings.append("热点严格匹配结果为空，已启用行业相关宽松推荐")
@@ -5405,14 +5593,14 @@ if not reuse_recommendation:
             selected_boss,
             industry_event_pool or live_events,
             backup_events or TODAY_EVENTS,
-            top_n=2,
+            top_n=1,
         )
         if guaranteed_events:
             matched_events = guaranteed_events
             if full_city_online:
-                live_warnings.append("已启用最小展示保障：固定展示2条同城线上活动")
+                live_warnings.append("已启用最小展示保障：固定展示1条同城线上活动")
             else:
-                live_warnings.append("已启用最小展示保障：强相关不足，已用次级相关线上活动补齐2条")
+                live_warnings.append("已启用最小展示保障：强相关不足，已用次级相关线上活动补齐1条")
 
     if not matched_news:
         guaranteed_news = _minimum_local_policy_news(industry_news_pool + all_news + live_news + DEFAULT_NEWS, top_n=2, boss=selected_boss)
