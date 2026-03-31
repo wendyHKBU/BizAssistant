@@ -1818,22 +1818,105 @@ def _extract_wechat_exhibition_events(
     return collected
 
 
-def _fetch_wechat_exhibition_center_events(max_items: int = 8) -> tuple[list[dict], list[str]]:
+def _same_canonical_city(city_a: str, city_b: str) -> bool:
+    left = _canonical_city_name(city_a)
+    right = _canonical_city_name(city_b)
+    return bool(left and right and left == right)
+
+
+def _source_city_priority_rank(source_city: str, preferred_city: str) -> tuple[int, float]:
+    source = _canonical_city_name(source_city)
+    preferred = _canonical_city_name(preferred_city)
+
+    if not preferred:
+        return 2, 9999.0
+    if source and source == preferred:
+        return 0, 0.0
+
+    if source in MAJOR_CITY_COORDS and preferred in MAJOR_CITY_COORDS:
+        src_lat, src_lon = MAJOR_CITY_COORDS[source]
+        pref_lat, pref_lon = MAJOR_CITY_COORDS[preferred]
+        distance = _haversine_km(src_lat, src_lon, pref_lat, pref_lon)
+        trip = _estimate_trip(distance)
+        travel_hours = float(trip.get("travel_hours", 99.0) or 99.0)
+        if travel_hours <= 2.5:
+            return 1, travel_hours
+        if travel_hours <= 4.0:
+            return 2, travel_hours
+        return 3, travel_hours
+
+    return 3, 9999.0
+
+
+def _rotate_list(items: list[dict], offset: int) -> list[dict]:
+    if not items:
+        return []
+    shift = offset % len(items)
+    return items[shift:] + items[:shift]
+
+
+def _prioritize_exhibition_sources(
+    sources: list[dict[str, str]],
+    preferred_city: str,
+    seed: int,
+) -> list[dict[str, str]]:
+    if not sources:
+        return []
+
+    preferred = _canonical_city_name(preferred_city)
+    if not preferred:
+        return _rotate_list(list(sources), seed)
+
+    same_city: list[dict[str, str]] = []
+    nearby_city: list[dict[str, str]] = []
+    midrange_city: list[dict[str, str]] = []
+    other_city: list[dict[str, str]] = []
+
+    for source in sources:
+        rank, _ = _source_city_priority_rank(str(source.get("city", "")), preferred)
+        if rank == 0:
+            same_city.append(source)
+        elif rank == 1:
+            nearby_city.append(source)
+        elif rank == 2:
+            midrange_city.append(source)
+        else:
+            other_city.append(source)
+
+    prioritized = (
+        _rotate_list(same_city, seed)
+        + _rotate_list(nearby_city, seed)
+        + _rotate_list(midrange_city, seed)
+        + _rotate_list(other_city, seed)
+    )
+    return prioritized
+
+
+def _fetch_wechat_exhibition_center_events(max_items: int = 8, preferred_city: str = "") -> tuple[list[dict], list[str]]:
     collected: list[dict] = []
     warnings: list[str] = []
     seen_urls = set()
 
-    for source in WECHAT_EXHIBITION_CENTER_SOURCES:
+    source_seed = int(datetime.now().strftime("%Y%m%d%H"))
+    prioritized_sources = _prioritize_exhibition_sources(
+        WECHAT_EXHIBITION_CENTER_SOURCES,
+        preferred_city=preferred_city,
+        seed=source_seed,
+    )
+
+    for source in prioritized_sources:
         query_url = _build_wechat_search_url(source["query"], city_hint=source["city"])
         html_text = _safe_get_text(query_url, timeout=9)
         if not html_text:
             continue
 
+        per_site_limit = 4 if _same_canonical_city(source.get("city", ""), preferred_city) else 3
+
         candidates = _extract_wechat_exhibition_events(
             html_text,
             city=source["city"],
             center_name=source["center"],
-            max_items=3,
+            max_items=per_site_limit,
         )
         for event in candidates:
             event_url = str(event.get("url", "")).strip()
@@ -1979,15 +2062,17 @@ def _extract_official_exhibition_events(
     return collected
 
 
-def _fetch_official_exhibition_center_events(max_items: int = 24) -> tuple[list[dict], list[str]]:
+def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city: str = "") -> tuple[list[dict], list[str]]:
     sources = OFFICIAL_EXHIBITION_CENTER_SOURCES
     if not sources:
         return [], ["会展中心官网源为空"]
 
-    batch_size = min(EXHIBITION_CENTER_FETCH_BATCH_SIZE, len(sources))
+    preferred_city_norm = _canonical_city_name(preferred_city)
+    batch_base = EXHIBITION_CENTER_FETCH_BATCH_SIZE + (8 if preferred_city_norm else 0)
+    batch_size = min(batch_base, len(sources))
     seed = int(datetime.now().strftime("%Y%m%d%H"))
-    start = seed % len(sources)
-    selected_sources = [sources[(start + idx) % len(sources)] for idx in range(batch_size)]
+    prioritized_sources = _prioritize_exhibition_sources(sources, preferred_city=preferred_city_norm, seed=seed)
+    selected_sources = prioritized_sources[:batch_size]
 
     collected: list[dict] = []
     warnings: list[str] = []
@@ -2003,10 +2088,12 @@ def _fetch_official_exhibition_center_events(max_items: int = 24) -> tuple[list[
         if not html_text:
             continue
 
+        per_site_limit = EXHIBITION_CENTER_PER_SITE_LIMIT + (1 if _same_canonical_city(source.get("city", ""), preferred_city_norm) else 0)
+
         candidates = _extract_official_exhibition_events(
             html_text,
             source=source,
-            max_items=EXHIBITION_CENTER_PER_SITE_LIMIT,
+            max_items=per_site_limit,
         )
         for event in candidates:
             title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
@@ -2026,13 +2113,24 @@ def _fetch_official_exhibition_center_events(max_items: int = 24) -> tuple[list[
 
             collected.append(event)
             if len(collected) >= max_items:
-                warnings.append(f"已补充会展中心官网排期活动 {len(collected)} 条")
+                if preferred_city_norm:
+                    local_cnt = sum(1 for item in collected if _same_canonical_city(_extract_event_city(item), preferred_city_norm))
+                    warnings.append(f"已按{preferred_city_norm}优先抓取会展中心官网，补充活动 {len(collected)} 条（本地{local_cnt}条）")
+                else:
+                    warnings.append(f"已补充会展中心官网排期活动 {len(collected)} 条")
                 return collected, warnings
 
     if collected:
-        warnings.append(f"已补充会展中心官网排期活动 {len(collected)} 条")
+        if preferred_city_norm:
+            local_cnt = sum(1 for item in collected if _same_canonical_city(_extract_event_city(item), preferred_city_norm))
+            warnings.append(f"已按{preferred_city_norm}优先抓取会展中心官网，补充活动 {len(collected)} 条（本地{local_cnt}条）")
+        else:
+            warnings.append(f"已补充会展中心官网排期活动 {len(collected)} 条")
     else:
-        warnings.append("会展中心官网排期暂未返回可解析活动（可能受站点结构或反爬限制）")
+        if preferred_city_norm:
+            warnings.append(f"会展中心官网排期暂未返回可解析活动（优先城市：{preferred_city_norm}，可能受站点结构或反爬限制）")
+        else:
+            warnings.append("会展中心官网排期暂未返回可解析活动（可能受站点结构或反爬限制）")
 
     return collected, warnings
 
@@ -2204,14 +2302,21 @@ def _dedupe_live_events(events: list[dict], max_items: int) -> list[dict]:
     return deduped
 
 
-def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
+def _build_live_events(max_items: int = 12, preferred_city: str = "") -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
     all_events: list[dict] = []
+    preferred_city_norm = _canonical_city_name(preferred_city)
 
     huodongxing_events = _fetch_huodongxing_events(max_items=max_items * 2)
     huodongjia_events = _fetch_huodongjia_events(max_items=max_items * 2)
-    wechat_exhibition_events, wechat_warnings = _fetch_wechat_exhibition_center_events(max_items=max(max_items, 8))
-    official_exhibition_events, official_warnings = _fetch_official_exhibition_center_events(max_items=max(max_items * 2, 24))
+    wechat_exhibition_events, wechat_warnings = _fetch_wechat_exhibition_center_events(
+        max_items=max(max_items, 8),
+        preferred_city=preferred_city_norm,
+    )
+    official_exhibition_events, official_warnings = _fetch_official_exhibition_center_events(
+        max_items=max(max_items * 2, 24),
+        preferred_city=preferred_city_norm,
+    )
 
     mixed_events = _interleave_event_sources(
         [official_exhibition_events, huodongxing_events, huodongjia_events, wechat_exhibition_events],
@@ -2268,8 +2373,9 @@ def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
 
 
 @st.cache_data(show_spinner=False)
-def get_realtime_feeds(refresh_bucket: int) -> tuple[list[dict], list[dict], str, list[str]]:
+def get_realtime_feeds(refresh_bucket: int, preferred_city: str = "") -> tuple[list[dict], list[dict], str, list[str]]:
     del refresh_bucket  # 作为缓存分桶键使用
+    preferred_city = _canonical_city_name(preferred_city)
     warnings = []
 
     live_news = _build_live_news(max_items=24)
@@ -2277,7 +2383,7 @@ def get_realtime_feeds(refresh_bucket: int) -> tuple[list[dict], list[dict], str
         live_news = DEFAULT_NEWS.copy()
         warnings.append("新闻源暂不可用，已自动回退到内置热点")
 
-    live_events, event_warnings = _build_live_events(max_items=12)
+    live_events, event_warnings = _build_live_events(max_items=12, preferred_city=preferred_city)
     if event_warnings:
         warnings.extend(event_warnings)
     if not live_events:
@@ -4830,13 +4936,17 @@ with st.sidebar:
 
 
 refresh_bucket = int(time.time() // (refresh_minutes * 60))
+preferred_fetch_city = _canonical_city_name(manual_city_input.strip()) or _canonical_city_name(str(selected_boss_base.get("city", "")).strip())
 if refresh:
     get_realtime_feeds.clear()
     st.toast("已手动刷新实时数据", icon="🔄")
 
 live_cache = st.session_state.get("live_context_cache") or {}
 cached_bucket = int(live_cache.get("refresh_bucket", -1)) if isinstance(live_cache, dict) else -1
-can_reuse_live_context = bool(refresh_goal and not refresh and cached_bucket == refresh_bucket)
+cached_pref_city = _canonical_city_name(str(live_cache.get("preferred_fetch_city", ""))) if isinstance(live_cache, dict) else ""
+can_reuse_live_context = bool(
+    refresh_goal and not refresh and cached_bucket == refresh_bucket and cached_pref_city == preferred_fetch_city
+)
 
 if can_reuse_live_context:
     live_news = [{**item} for item in (live_cache.get("live_news") or [])]
@@ -4846,7 +4956,10 @@ if can_reuse_live_context:
     user_geo_profile = dict(live_cache.get("user_geo_profile") or {"enabled": False})
     st.toast("已快速刷新智能目标（复用当前实时数据）", icon="⚡")
 else:
-    live_news_raw, live_events_raw, live_updated_at, live_warnings_raw = get_realtime_feeds(refresh_bucket)
+    live_news_raw, live_events_raw, live_updated_at, live_warnings_raw = get_realtime_feeds(
+        refresh_bucket,
+        preferred_city=preferred_fetch_city,
+    )
     live_warnings = list(live_warnings_raw)
 
     live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(live_events_raw, max_travel_hours=MAX_TRAVEL_HOURS)
@@ -4861,6 +4974,7 @@ else:
         "live_updated_at": live_updated_at,
         "live_warnings": list(live_warnings),
         "user_geo_profile": dict(user_geo_profile),
+        "preferred_fetch_city": preferred_fetch_city,
     }
 
 if user_geo_profile.get("enabled"):
