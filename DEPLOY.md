@@ -19,6 +19,9 @@
 - 如后续启用真实AI模式，请在 Render 的 Environment Variables 添加 `ANTHROPIC_API_KEY`。
 - 新闻与政策默认使用本土源（中国政府网政策页 + 百度新闻 RSS + 36氪/钛媒体 RSS），无需额外 key。
 - 活动默认使用本土活动源（活动行公开活动页），无需额外 key。
+- 活动推荐已启用“用户IP + 2小时路程大城市硬过滤”，线下活动会附带时间成本和交通成本估算。
+- IP定位依赖请求头（如 `X-Forwarded-For`）和公开地理解析服务（`ipwho.is` / `ipapi.co`），均无需 key。
+- 若运行环境无法提供真实用户IP，系统会提示并临时关闭该硬过滤，不影响基础功能。
 - 以下两个国际活动 API key 现在是“可选补充源”（不配置也能跑）：
 - `EVENTBRITE_API_TOKEN`（Eventbrite Personal OAuth token）
 - `TICKETMASTER_API_KEY`（Ticketmaster Discovery API key）

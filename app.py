@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 import html
+import ipaddress
+import math
 import os
 import re
 import time
@@ -146,6 +148,59 @@ NON_MAINLAND_LOCATION_MARKERS = [
     "北美",
     "澳大利亚",
 ]
+
+MAJOR_CITY_COORDS = {
+    "北京": (39.9042, 116.4074),
+    "上海": (31.2304, 121.4737),
+    "广州": (23.1291, 113.2644),
+    "深圳": (22.5431, 114.0579),
+    "杭州": (30.2741, 120.1551),
+    "南京": (32.0603, 118.7969),
+    "苏州": (31.2989, 120.5853),
+    "成都": (30.5728, 104.0668),
+    "重庆": (29.5630, 106.5516),
+    "武汉": (30.5928, 114.3055),
+    "西安": (34.3416, 108.9398),
+    "天津": (39.3434, 117.3616),
+    "长沙": (28.2282, 112.9388),
+    "郑州": (34.7466, 113.6254),
+    "青岛": (36.0671, 120.3826),
+    "宁波": (29.8683, 121.5440),
+    "厦门": (24.4798, 118.0894),
+    "合肥": (31.8206, 117.2272),
+    "福州": (26.0745, 119.2965),
+    "东莞": (23.0207, 113.7518),
+    "佛山": (23.0215, 113.1214),
+    "济南": (36.6512, 117.1201),
+}
+
+MAJOR_CITY_ALIASES = {
+    "北京市": "北京",
+    "上海市": "上海",
+    "广州市": "广州",
+    "深圳市": "深圳",
+    "杭州市": "杭州",
+    "南京市": "南京",
+    "苏州市": "苏州",
+    "成都市": "成都",
+    "重庆市": "重庆",
+    "武汉市": "武汉",
+    "西安市": "西安",
+    "天津市": "天津",
+    "长沙市": "长沙",
+    "郑州市": "郑州",
+    "青岛市": "青岛",
+    "宁波市": "宁波",
+    "厦门市": "厦门",
+    "合肥市": "合肥",
+    "福州市": "福州",
+    "东莞市": "东莞",
+    "佛山市": "佛山",
+    "济南市": "济南",
+}
+
+MAX_TRAVEL_HOURS = 2.0
+TIME_VALUE_PER_HOUR_RMB = 220
 
 
 def _google_rss_url(query: str) -> str:
@@ -330,6 +385,294 @@ def _safe_api_get_json(url: str, *, params: dict | None = None, headers: dict | 
         return response.json()
     except Exception:
         return None
+
+
+def _is_public_ip(ip_text: str) -> bool:
+    try:
+        ip_obj = ipaddress.ip_address(ip_text)
+    except Exception:
+        return False
+    return not (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    )
+
+
+def _extract_public_ipv4(raw_text: str) -> str:
+    if not raw_text:
+        return ""
+    candidates = re.findall(r"(?:\d{1,3}\.){3}\d{1,3}", raw_text)
+    for ip_text in candidates:
+        if _is_public_ip(ip_text):
+            return ip_text
+    return ""
+
+
+def _get_request_headers() -> dict:
+    headers: dict = {}
+
+    try:
+        context_headers = getattr(getattr(st, "context", None), "headers", None)
+        if context_headers:
+            headers.update(dict(context_headers))
+    except Exception:
+        pass
+
+    if headers:
+        return headers
+
+    try:
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+
+        websocket_headers = _get_websocket_headers() or {}
+        headers.update(dict(websocket_headers))
+    except Exception:
+        pass
+
+    return headers
+
+
+def _extract_client_ip() -> str:
+    headers = _get_request_headers()
+    if not headers:
+        return ""
+
+    normalized = {str(k).lower(): str(v) for k, v in headers.items()}
+    for key in [
+        "x-forwarded-for",
+        "x-real-ip",
+        "cf-connecting-ip",
+        "x-client-ip",
+        "x-original-forwarded-for",
+    ]:
+        ip_text = _extract_public_ipv4(normalized.get(key, ""))
+        if ip_text:
+            return ip_text
+
+    return ""
+
+
+@st.cache_data(show_spinner=False)
+def _lookup_ip_geo(ip_text: str) -> dict:
+    if not ip_text:
+        return {"ok": False}
+
+    primary = _safe_api_get_json(f"https://ipwho.is/{ip_text}")
+    if primary and primary.get("success"):
+        try:
+            lat = float(primary.get("latitude"))
+            lon = float(primary.get("longitude"))
+        except Exception:
+            lat = None
+            lon = None
+
+        if lat is not None and lon is not None:
+            return {
+                "ok": True,
+                "ip": ip_text,
+                "city": (primary.get("city") or "").strip(),
+                "region": (primary.get("region") or "").strip(),
+                "country": (primary.get("country_code") or "").strip(),
+                "lat": lat,
+                "lon": lon,
+                "provider": "ipwho.is",
+            }
+
+    secondary = _safe_api_get_json(f"https://ipapi.co/{ip_text}/json/")
+    if secondary and not secondary.get("error"):
+        try:
+            lat = float(secondary.get("latitude"))
+            lon = float(secondary.get("longitude"))
+        except Exception:
+            lat = None
+            lon = None
+
+        if lat is not None and lon is not None:
+            return {
+                "ok": True,
+                "ip": ip_text,
+                "city": (secondary.get("city") or "").strip(),
+                "region": (secondary.get("region") or "").strip(),
+                "country": (secondary.get("country_code") or "").strip(),
+                "lat": lat,
+                "lon": lon,
+                "provider": "ipapi.co",
+            }
+
+    return {"ok": False, "ip": ip_text}
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    radius = 6371.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    d_phi = math.radians(lat2 - lat1)
+    d_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(d_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(d_lambda / 2) ** 2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return radius * c
+
+
+def _estimate_trip(distance_km: float) -> dict:
+    if distance_km <= 30:
+        mode = "市内交通"
+        travel_hours = max(0.35, 0.25 + distance_km / 35)
+        transport_cost = max(12.0, distance_km * 2.2)
+    elif distance_km <= 260:
+        mode = "高铁/城际交通"
+        travel_hours = 0.65 + distance_km / 210
+        transport_cost = 35.0 + distance_km * 0.48
+    else:
+        mode = "航班+地面交通"
+        travel_hours = 2.3 + distance_km / 650
+        transport_cost = 260.0 + distance_km * 0.8
+
+    time_cost = travel_hours * TIME_VALUE_PER_HOUR_RMB
+    total_cost = transport_cost + time_cost
+    return {
+        "travel_mode": mode,
+        "travel_hours": round(travel_hours, 2),
+        "distance_km": round(distance_km, 1),
+        "transport_cost_rmb": round(transport_cost, 0),
+        "time_cost_rmb": round(time_cost, 0),
+        "total_trip_cost_rmb": round(total_cost, 0),
+    }
+
+
+def _extract_event_city(event: dict) -> str:
+    text = f"{event.get('location', '')} {event.get('title', '')}"
+    for alias, canonical in MAJOR_CITY_ALIASES.items():
+        if alias in text:
+            return canonical
+    for city in MAJOR_CITY_COORDS:
+        if city in text:
+            return city
+    return ""
+
+
+def _nearest_major_city(lat: float, lon: float) -> dict:
+    best_city = ""
+    best_distance = float("inf")
+    for city, (city_lat, city_lon) in MAJOR_CITY_COORDS.items():
+        distance = _haversine_km(lat, lon, city_lat, city_lon)
+        if distance < best_distance:
+            best_distance = distance
+            best_city = city
+    return {"city": best_city, "distance_km": round(best_distance, 1)}
+
+
+def _build_reachable_city_scope(lat: float, lon: float, max_travel_hours: float) -> list[dict]:
+    reachable: list[dict] = []
+    for city, (city_lat, city_lon) in MAJOR_CITY_COORDS.items():
+        distance = _haversine_km(lat, lon, city_lat, city_lon)
+        plan = _estimate_trip(distance)
+        if plan["travel_hours"] <= max_travel_hours:
+            reachable.append({"city": city, **plan})
+
+    reachable.sort(key=lambda item: (item.get("travel_hours", 99), item.get("distance_km", 9999)))
+    return reachable
+
+
+def _attach_online_trip_fields(event: dict) -> dict:
+    event_copy = {**event}
+    event_copy["event_city"] = "线上"
+    event_copy["travel_mode"] = "线上参加"
+    event_copy["travel_hours"] = 0.0
+    event_copy["distance_km"] = 0.0
+    event_copy["transport_cost_rmb"] = 0.0
+    event_copy["time_cost_rmb"] = 0.0
+    event_copy["total_trip_cost_rmb"] = 0.0
+    event_copy["travel_brief"] = "线上参加，交通成本≈¥0"
+    event_copy["travel_note"] = "线上参加，交通成本约 ¥0，时间成本为通勤 0 小时。"
+    return event_copy
+
+
+def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_TRAVEL_HOURS) -> tuple[list[dict], dict, list[str]]:
+    warnings: list[str] = []
+    if not events:
+        return [], {"enabled": False}, warnings
+
+    client_ip = _extract_client_ip()
+    if not client_ip:
+        warnings.append("未识别到用户IP，暂未启用1-2小时路程硬过滤")
+        return [{**event} for event in events], {"enabled": False}, warnings
+
+    geo = _lookup_ip_geo(client_ip)
+    if not geo.get("ok"):
+        warnings.append("用户IP定位失败，暂未启用1-2小时路程硬过滤")
+        return [{**event} for event in events], {"enabled": False, "ip": client_ip}, warnings
+
+    user_lat = float(geo.get("lat"))
+    user_lon = float(geo.get("lon"))
+
+    city_scope = _build_reachable_city_scope(user_lat, user_lon, max_travel_hours=max_travel_hours)
+    allowed_cities = {item["city"] for item in city_scope}
+
+    filtered: list[dict] = []
+    far_events: list[dict] = []
+    unknown_offline_count = 0
+
+    for event in events:
+        text = f"{event.get('format', '')} {event.get('location', '')}"
+        is_online = "线上" in text or event.get("format") == "线上"
+        if is_online:
+            filtered.append(_attach_online_trip_fields(event))
+            continue
+
+        event_city = _extract_event_city(event)
+        if not event_city:
+            unknown_offline_count += 1
+            continue
+
+        city_lat, city_lon = MAJOR_CITY_COORDS[event_city]
+        distance = _haversine_km(user_lat, user_lon, city_lat, city_lon)
+        trip = _estimate_trip(distance)
+
+        event_copy = {**event}
+        event_copy["event_city"] = event_city
+        event_copy.update(trip)
+        event_copy["travel_brief"] = f"单程 {trip['travel_hours']:.1f} 小时，交通约 ¥{trip['transport_cost_rmb']:.0f}"
+        event_copy["travel_note"] = (
+            f"单程约 {trip['travel_hours']:.1f} 小时（{trip['travel_mode']}），"
+            f"交通约 ¥{trip['transport_cost_rmb']:.0f}，时间成本约 ¥{trip['time_cost_rmb']:.0f}。"
+        )
+
+        if event_city in allowed_cities and trip["travel_hours"] <= max_travel_hours:
+            filtered.append(event_copy)
+        else:
+            far_events.append(event_copy)
+
+    if unknown_offline_count:
+        warnings.append(f"有 {unknown_offline_count} 个线下活动未识别城市，已按硬过滤剔除")
+
+    if far_events:
+        nearest = min(far_events, key=lambda item: item.get("travel_hours", 99))
+        warnings.append(
+            f"已剔除 {len(far_events)} 个超出{max_travel_hours:.0f}小时范围的线下活动；"
+            f"最近一项单程约 {nearest.get('travel_hours', 0):.1f} 小时，交通约 ¥{nearest.get('transport_cost_rmb', 0):.0f}"
+        )
+
+    if not filtered:
+        warnings.append("IP硬过滤后暂无可达活动，建议优先线上活动或放宽城市圈")
+
+    nearest_city = _nearest_major_city(user_lat, user_lon)
+    profile = {
+        "enabled": True,
+        "ip": client_ip,
+        "city": geo.get("city", ""),
+        "region": geo.get("region", ""),
+        "country": geo.get("country", ""),
+        "provider": geo.get("provider", ""),
+        "nearest_major_city": nearest_city.get("city", ""),
+        "nearest_major_city_distance_km": nearest_city.get("distance_km", 0),
+        "scope_cities": [item["city"] for item in city_scope[:8]],
+    }
+    return filtered, profile, warnings
 
 
 def _infer_event_location(title: str, description: str, event_format: str, fallback_label: str) -> str:
@@ -772,7 +1115,7 @@ def get_realtime_feeds(refresh_bucket: int) -> tuple[list[dict], list[dict], str
         warnings.extend(event_warnings)
     if not live_events:
         live_events = TODAY_EVENTS.copy()
-        warnings.append("活动 API 暂不可用，已自动回退到内置活动池")
+        warnings.append("活动源暂不可用，已自动回退到内置活动池")
 
     updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return live_news, live_events, updated_at, warnings
@@ -1297,12 +1640,16 @@ def build_today_actions(boss: dict, matched_events: list[dict], matched_news: li
     if matched_events:
         top_event = matched_events[0]
         kw = "、".join(top_event.get("matched_keywords", [])[:2]) or "行业机会"
+        travel_brief = top_event.get("travel_brief", "")
+        reason = f"活动与你的「{kw}」高度匹配，适合用来拓展当下高价值连接。"
+        if travel_brief:
+            reason += f" 到场成本：{travel_brief}。"
         actions.append(
             {
                 "time": "今天",
                 "priority": "高" if top_event.get("value") == "高" else "中",
                 "title": f"确认活动：{top_event['title']}",
-                "reason": f"活动与你的「{kw}」高度匹配，适合用来拓展当下高价值连接。",
+                "reason": reason,
             }
         )
 
@@ -1473,6 +1820,8 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
         event_cards: list[str] = []
         for idx, event in enumerate(matched_events, 1):
             matched_kw = "、".join(event.get("matched_keywords", [])[:3]) or "行业相关"
+            travel_note = event.get("travel_note", "")
+            travel_line = f"<div class=\"wf-action\">到场成本：{html.escape(travel_note)}</div>" if travel_note else ""
             event_cards.append(
                 block_html(
                     f"""
@@ -1482,6 +1831,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
                       <div class="wf-action">建议动作：{html.escape(event.get('registration_deadline', '尽快确认报名'))}</div>
+                      {travel_line}
                     </article>
                     """
                 )
@@ -1618,6 +1968,8 @@ with st.sidebar:
     mode_caption = st.empty()
     count_caption = st.empty()
     update_caption = st.empty()
+    geo_caption = st.empty()
+    scope_caption = st.empty()
     warning_caption = st.empty()
 
 
@@ -1627,12 +1979,30 @@ if refresh:
     st.toast("已手动刷新实时数据", icon="🔄")
 
 live_news, live_events, live_updated_at, live_warnings = get_realtime_feeds(refresh_bucket)
+live_warnings = list(live_warnings)
 
-mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动，国际 API 可选补充；每 {refresh_minutes} 分钟自动刷新）")
+live_events, user_geo_profile, geo_warnings = apply_ip_proximity_filter(live_events, max_travel_hours=MAX_TRAVEL_HOURS)
+if geo_warnings:
+    live_warnings.extend(geo_warnings)
+
+if user_geo_profile.get("enabled"):
+    city = user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "未知城市"
+    region = user_geo_profile.get("region", "")
+    geo_caption.caption(f"IP定位：{city}{(' · ' + region) if region else ''}（已启用1-2小时硬过滤）")
+    scope_cities = user_geo_profile.get("scope_cities", [])
+    if scope_cities:
+        scope_caption.caption("可达大城市：" + "、".join(scope_cities[:6]))
+    else:
+        scope_caption.caption("可达大城市：暂无（仅保留线上活动）")
+else:
+    geo_caption.caption("IP定位：未识别（暂未启用1-2小时硬过滤）")
+    scope_caption.caption("")
+
+mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动 + IP路程硬过滤；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
 update_caption.caption(f"更新时间：{live_updated_at}")
 if live_warnings:
-    warning_caption.caption("数据源降级：" + "；".join(live_warnings))
+    warning_caption.caption("系统提示：" + "；".join(live_warnings))
 
 
 extra_news: list[dict] = []
