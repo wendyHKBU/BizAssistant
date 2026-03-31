@@ -239,6 +239,32 @@ MAJOR_CITY_ALIASES = {
     "济南市": "济南",
 }
 
+EN_CITY_TO_CN = {
+    "beijing": "北京",
+    "shanghai": "上海",
+    "guangzhou": "广州",
+    "shenzhen": "深圳",
+    "hangzhou": "杭州",
+    "nanjing": "南京",
+    "suzhou": "苏州",
+    "chengdu": "成都",
+    "chongqing": "重庆",
+    "wuhan": "武汉",
+    "xian": "西安",
+    "xi'an": "西安",
+    "tianjin": "天津",
+    "changsha": "长沙",
+    "zhengzhou": "郑州",
+    "qingdao": "青岛",
+    "ningbo": "宁波",
+    "xiamen": "厦门",
+    "hefei": "合肥",
+    "fuzhou": "福州",
+    "dongguan": "东莞",
+    "foshan": "佛山",
+    "jinan": "济南",
+}
+
 CITY_12306_STATION_CODES = {
     "北京": "BJP",
     "上海": "SHH",
@@ -433,6 +459,12 @@ def _normalize_event_text(text: str, max_len: int = 150) -> str:
     if len(clean) <= max_len:
         return clean
     return clean[: max_len - 3].rstrip() + "..."
+
+
+def _extract_profile_terms(text: str) -> list[str]:
+    terms = re.findall(r"[A-Za-z]{2,}|[\u4e00-\u9fff]{2,}", (text or "").lower())
+    ignored = {"公司", "团队", "方向", "行业", "服务", "业务"}
+    return [term for term in terms if term not in ignored]
 
 
 def _safe_api_get_json(url: str, *, params: dict | None = None, headers: dict | None = None) -> dict | None:
@@ -750,10 +782,11 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
         warnings.append("IP硬过滤后暂无可达活动，建议优先线上活动或放宽城市圈")
 
     nearest_city = _nearest_major_city(user_lat, user_lon)
+    normalized_city = _canonical_city_name(str(geo.get("city", "")))
     profile = {
         "enabled": True,
         "ip": client_ip,
-        "city": geo.get("city", ""),
+        "city": normalized_city or geo.get("city", ""),
         "region": geo.get("region", ""),
         "country": geo.get("country", ""),
         "provider": geo.get("provider", ""),
@@ -1983,12 +2016,248 @@ def priority_weight(level: str) -> int:
     return order.get(level, 3)
 
 
+def _infer_boss_news_preferences(boss: dict) -> set[str]:
+    text = " ".join([boss.get("industry", ""), boss.get("current_goal", ""), " ".join(boss.get("keywords", []))]).lower()
+    prefs: set[str] = set()
+    for category, keywords in NEWS_CATEGORY_RULES.items():
+        if any(str(keyword).lower() in text for keyword in keywords):
+            prefs.add(category)
+    return prefs
+
+
+def _infer_boss_event_preferences(boss: dict) -> set[str]:
+    text = " ".join([boss.get("industry", ""), boss.get("current_goal", ""), " ".join(boss.get("keywords", []))]).lower()
+    prefs: set[str] = set()
+    for industry_name, keywords in EVENT_INDUSTRY_RULES.items():
+        if industry_name.lower() in text or any(str(keyword).lower() in text for keyword in keywords):
+            prefs.add(industry_name.lower())
+    return prefs
+
+
+def _news_relevance_tier(boss: dict, item: dict) -> int:
+    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
+    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
+    news_prefs = _infer_boss_news_preferences(boss)
+
+    title = str(item.get("title", ""))
+    category = str(item.get("category", ""))
+    text = f"{title} {category}".lower()
+    if any(ig and ig in text for ig in ignore_keywords):
+        return -1
+
+    keyword_hits = sum(1 for kw in boss_keywords if kw and kw in text)
+    category_hit = category in news_prefs
+    industry_terms = _extract_profile_terms(boss.get("industry", ""))
+    industry_hit = any(term in text for term in industry_terms if len(term) > 1)
+
+    if keyword_hits >= 1 or category_hit:
+        return 2
+    if industry_hit or category == "政策":
+        return 1
+    return 0
+
+
+def _event_relevance_tier(boss: dict, event: dict) -> int:
+    ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
+    boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
+    event_prefs = _infer_boss_event_preferences(boss)
+
+    event_keywords = [str(kw).lower() for kw in event.get("keywords", [])]
+    event_industries = [str(ind).lower() for ind in event.get("target_industries", [])]
+    text = f"{event.get('title', '')} {event.get('description', '')} {' '.join(event_keywords)} {' '.join(event_industries)}".lower()
+    if any(ig and ig in text for ig in ignore_keywords):
+        return -1
+
+    keyword_hits = sum(1 for kw in boss_keywords if kw and (kw in text or any(kw in ek for ek in event_keywords)))
+    industry_hit = any(any(pref in ind or ind in pref for ind in event_industries) for pref in event_prefs)
+    industry_terms = _extract_profile_terms(boss.get("industry", ""))
+    term_hit = any(term in text for term in industry_terms if len(term) > 1)
+
+    if industry_hit or keyword_hits >= 2:
+        return 2
+    if keyword_hits == 1 or term_hit:
+        return 1
+    return 0
+
+
+def _event_rank_key(event: dict) -> tuple[int, int, int]:
+    value_weight = 1 if event.get("value") == "高" else 0
+    reachable = 1 if float(event.get("travel_hours", 9) or 9) <= MAX_TRAVEL_HOURS else 0
+    online = 1 if _is_online_event(event) else 0
+    return (value_weight, reachable, online)
+
+
+def _build_industry_event_pool(boss: dict, events: list[dict], top_n: int = 18, min_secondary: int = 2) -> list[dict]:
+    deduped: list[dict] = []
+    seen_titles = set()
+    for event in events:
+        title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        deduped.append(event)
+
+    primary: list[dict] = []
+    secondary: list[dict] = []
+    for event in deduped:
+        tier = _event_relevance_tier(boss, event)
+        if tier >= 2:
+            primary.append(event)
+        elif tier == 1:
+            secondary.append(event)
+
+    primary.sort(key=_event_rank_key, reverse=True)
+    secondary.sort(key=_event_rank_key, reverse=True)
+
+    selected: list[dict] = []
+    if primary:
+        selected.extend(primary[:top_n])
+        if len(selected) < top_n:
+            selected.extend(secondary[: top_n - len(selected)])
+    elif secondary:
+        keep = max(1, min(min_secondary, len(secondary), top_n))
+        selected.extend(secondary[:keep])
+
+    return selected[:top_n]
+
+
+def _build_industry_news_pool(boss: dict, news_items: list[dict], top_n: int = 24, min_secondary: int = 2) -> list[dict]:
+    deduped: list[dict] = []
+    seen_titles = set()
+    for item in news_items:
+        title_key = re.sub(r"\s+", " ", str(item.get("title", "")).lower()).strip()
+        if not title_key or title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        deduped.append(item)
+
+    primary: list[dict] = []
+    secondary: list[dict] = []
+    for item in deduped:
+        tier = _news_relevance_tier(boss, item)
+        if tier >= 2:
+            primary.append(item)
+        elif tier == 1:
+            secondary.append(item)
+
+    primary.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
+    secondary.sort(key=lambda item: int(item.get("score", 0) or 0), reverse=True)
+
+    selected: list[dict] = []
+    if primary:
+        selected.extend(primary[:top_n])
+        if len(selected) < top_n:
+            selected.extend(secondary[: top_n - len(selected)])
+    elif secondary:
+        keep = max(1, min(min_secondary, len(secondary), top_n))
+        selected.extend(secondary[:keep])
+
+    return selected[:top_n]
+
+
+def _infer_goal_domain(boss: dict) -> str:
+    text = " ".join([boss.get("industry", ""), " ".join(boss.get("keywords", [])), boss.get("current_goal", "")]).lower()
+    rules = [
+        ("餐饮", ["餐饮", "门店", "连锁", "预制菜", "外卖"]),
+        ("品牌", ["品牌", "营销", "内容", "私域", "新消费"]),
+        ("企业培训", ["培训", "管理咨询", "hr", "组织发展"]),
+        ("外贸", ["外贸", "跨境", "出口", "东南亚", "供应链"]),
+        ("设计", ["设计", "ui", "ux", "用户体验"]),
+        ("电商", ["电商", "直播", "抖音", "流量", "选款"]),
+        ("汽配", ["汽配", "汽车配件", "新能源", "b2b", "出口"]),
+        ("猎头", ["猎头", "招聘", "人才", "高管", "hr"]),
+        ("建材", ["建材", "工程", "装修", "地产", "采购"]),
+        ("法律科技", ["法律", "律所", "合规", "saas", "融资"]),
+    ]
+    for domain, markers in rules:
+        if any(marker in text for marker in markers):
+            return domain
+    return "通用"
+
+
+def _generate_smart_goal(boss: dict, news_items: list[dict], events: list[dict], seed: int = 0) -> str:
+    domain = _infer_goal_domain(boss)
+    city = _canonical_city_name(boss.get("city", "")) or "本地"
+    primary_keyword = (boss.get("keywords") or ["核心业务"])[0]
+
+    related_news = [item for item in news_items if _news_relevance_tier(boss, item) >= 1]
+    related_events = [item for item in events if _event_relevance_tier(boss, item) >= 1]
+    hot_category = "行业"
+    for item in related_news:
+        cat = str(item.get("category", "")).strip()
+        if cat:
+            hot_category = cat
+            break
+
+    templates = {
+        "餐饮": [
+            "围绕{city}门店增长，优先筛选餐饮连锁与供应链降本机会，本周落地1个可执行动作。",
+            "聚焦{primary_keyword}与{hot_category}信号，先做门店选址和爆品结构优化，形成可复用打法。",
+        ],
+        "品牌": [
+            "围绕{city}高潜客户，优先筛选品牌升级与{hot_category}项目机会，本周完成2个高质量触达。",
+            "以{primary_keyword}为主线，先拿下1个可展示案例，再扩展科技/新消费方向的新增客户。",
+        ],
+        "企业培训": [
+            "围绕{city}企业客户，优先筛选培训与组织发展场景，本周推进1个可签单需求。",
+            "聚焦{primary_keyword}和{hot_category}趋势，先做2次关键决策人沟通，缩短成交周期。",
+        ],
+        "外贸": [
+            "围绕{city}外贸与跨境机会，优先筛选{hot_category}相关客户，本周形成1个新增询盘闭环。",
+            "聚焦{primary_keyword}主线，先优化报价与供货稳定性，再拓展东南亚新客户。",
+        ],
+        "设计": [
+            "围绕{city}产品团队，优先筛选设计升级和AI提效项目，本周拿下1个可展示合作。",
+            "以{primary_keyword}为切口，先输出可量化价值方案，再推进2个潜在客户跟进。",
+        ],
+        "电商": [
+            "围绕{city}电商增长，优先筛选直播转化和选品优化机会，本周跑通1轮小规模验证。",
+            "聚焦{primary_keyword}和{hot_category}热点，先优化流量与转化链路，再扩大投放。",
+        ],
+        "汽配": [
+            "围绕{city}汽配出海机会，优先筛选新能源与B2B客户，本周完成1个高价值商机对接。",
+            "以{primary_keyword}为抓手，先沉淀报价与交付优势，再推进海外渠道合作。",
+        ],
+        "猎头": [
+            "围绕{city}中高端人才需求，优先筛选AI/新能源岗位机会，本周提交2位高匹配候选人。",
+            "聚焦{primary_keyword}方向，先做候选人池扩容，再推进关键客户职位独家合作。",
+        ],
+        "建材": [
+            "围绕{city}工程采购需求，优先筛选建材与市政项目机会，本周推进1个可成交项目。",
+            "以{primary_keyword}为主线，先优化账期和回款，再拓展政府工程相关合作。",
+        ],
+        "法律科技": [
+            "围绕{city}律所与企业法务场景，优先筛选法律科技合作机会，本周完成1次产品演示。",
+            "聚焦{primary_keyword}与{hot_category}趋势，先打磨标杆案例，再推进融资与客户拓展。",
+        ],
+        "通用": [
+            "围绕{city}核心客户群，优先筛选与{primary_keyword}相关的高价值机会，本周形成1个可执行闭环。",
+            "结合{hot_category}趋势，先做2次关键客户触达，再推进1个可量化的业务增长动作。",
+        ],
+    }
+
+    rng_seed = seed + sum(ord(ch) for ch in f"{boss.get('name', '')}-{city}-{domain}")
+    rng = random.Random(rng_seed)
+    options = templates.get(domain, templates["通用"])
+    template = rng.choice(options)
+    goal = template.format(city=city, primary_keyword=primary_keyword, hot_category=hot_category)
+
+    # 若实时数据中有强相关候选，目标更偏“立即成交”
+    if related_events and rng.random() > 0.5:
+        event_name = str(related_events[0].get("title", "")).strip()
+        if event_name:
+            goal = f"优先围绕「{event_name[:18]}」机会推进关键客户对接，并在本周形成可执行成交动作。"
+
+    return goal
+
+
 def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4) -> list[dict]:
     ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
     boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
     city = boss.get("city", "")
+    news_prefs = _infer_boss_news_preferences(boss)
 
-    scored: list[dict] = []
+    scored: list[tuple[int, int, dict]] = []
     for item in news_items:
         title = str(item.get("title", ""))
         category = str(item.get("category", ""))
@@ -1996,6 +2265,10 @@ def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4
         category_lower = category.lower()
 
         if any(ig in title_lower or ig in category_lower for ig in ignore_keywords):
+            continue
+
+        tier = _news_relevance_tier(boss, item)
+        if tier < 0:
             continue
 
         score = 8
@@ -2009,20 +2282,40 @@ def _fallback_news_candidates(boss: dict, news_items: list[dict], top_n: int = 4
         if city and city in title:
             score += 8
 
-        # 政策/行业热点默认给基础分，避免长期空白
-        if category in {"政策", "金融", "AI科技", "电商", "外贸", "跨境电商", "制造业", "新能源", "法律科技"}:
-            score += 8
+        if category in news_prefs:
+            score += 16
+        elif category in {"政策", "金融", "AI科技", "电商", "外贸", "跨境电商", "制造业", "新能源", "法律科技"}:
+            score += 4
 
-        scored.append(
-            {
-                **item,
-                "score": min(68, score),
-                "matched": list(dict.fromkeys(matched))[:3] or [category or "行业热点"],
-            }
-        )
+        score += tier * 10
 
-    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return scored[:top_n]
+        news_copy = {
+            **item,
+            "score": min(76, score),
+            "matched": list(dict.fromkeys(matched))[:3] or ([category] if category else ["行业热点"]),
+        }
+        scored.append((tier, int(news_copy["score"]), news_copy))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    primary = [item for tier, _, item in scored if tier >= 2]
+    secondary = [item for tier, _, item in scored if tier == 1]
+    selected: list[dict] = []
+
+    if primary:
+        selected.extend(primary[:top_n])
+        if len(selected) < top_n:
+            selected.extend(secondary[: top_n - len(selected)])
+    elif secondary:
+        # 没有强相关时至少保留 1-2 条次级相关
+        keep = max(1, min(2, top_n, len(secondary)))
+        selected.extend(secondary[:keep])
+
+    if len(selected) < top_n:
+        leftovers = [item for _, _, item in scored if item not in selected]
+        selected.extend(leftovers[: top_n - len(selected)])
+
+    return selected[:top_n]
 
 
 def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -> list[dict]:
@@ -2030,10 +2323,14 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
     boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
     city = boss.get("city", "")
 
-    scored: list[dict] = []
+    scored: list[tuple[int, int, dict]] = []
     for event in events:
         text = f"{event.get('title', '')} {event.get('description', '')}".lower()
         if any(ig in text for ig in ignore_keywords):
+            continue
+
+        tier = _event_relevance_tier(boss, event)
+        if tier < 0:
             continue
 
         score = 10
@@ -2042,6 +2339,8 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
             if kw and (kw in text or any(kw in str(ek).lower() for ek in event.get("keywords", []))):
                 score += 12
                 matched_keywords.append(kw)
+
+        score += tier * 10
 
         if city and city in str(event.get("location", "")):
             score += 10
@@ -2052,16 +2351,32 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
         if float(event.get("travel_hours", 9) or 9) <= MAX_TRAVEL_HOURS:
             score += 8
 
-        scored.append(
-            {
-                **event,
-                "score": min(66, int(score)),
-                "matched_keywords": list(dict.fromkeys(matched_keywords))[:3] or ["同城/低成本可达"],
-            }
-        )
+        event_copy = {
+            **event,
+            "score": min(78, int(score)),
+            "matched_keywords": list(dict.fromkeys(matched_keywords))[:3] or ([boss.get("industry", "行业相关")[:8]] if tier >= 1 else ["同城/低成本可达"]),
+        }
+        scored.append((tier, int(event_copy["score"]), event_copy))
 
-    scored.sort(key=lambda x: x.get("score", 0), reverse=True)
-    return scored[:top_n]
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+    primary = [item for tier, _, item in scored if tier >= 2]
+    secondary = [item for tier, _, item in scored if tier == 1]
+    selected: list[dict] = []
+
+    if primary:
+        selected.extend(primary[:top_n])
+        if len(selected) < top_n:
+            selected.extend(secondary[: top_n - len(selected)])
+    elif secondary:
+        keep = max(1, min(2, top_n, len(secondary)))
+        selected.extend(secondary[:keep])
+
+    if len(selected) < top_n:
+        leftovers = [item for _, _, item in scored if item not in selected]
+        selected.extend(leftovers[: top_n - len(selected)])
+
+    return selected[:top_n]
 
 
 def _is_online_event(event: dict) -> bool:
@@ -2090,9 +2405,13 @@ def _minimum_online_city_events(boss: dict, primary_events: list[dict], backup_e
         seen_titles.add(title_key)
         deduped.append(event)
 
-    scored: list[tuple[int, int, dict]] = []
+    scored: list[tuple[int, int, int, dict]] = []
     for event in deduped:
         if not _is_online_event(event):
+            continue
+
+        tier = _event_relevance_tier(boss, event)
+        if tier < 0:
             continue
 
         event_copy = {**event}
@@ -2113,13 +2432,14 @@ def _minimum_online_city_events(boss: dict, primary_events: list[dict], backup_e
         if not event_copy.get("registration_deadline"):
             event_copy["registration_deadline"] = "详见活动页"
 
-        scored.append((1 if city_match else 0, int(event_copy["score"]), event_copy))
+        scored.append((tier, 1 if city_match else 0, int(event_copy["score"]), event_copy))
 
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = [item[2] for item in scored[:top_n]]
+    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    selected = [item[3] for item in scored[:top_n]]
 
     if len(selected) < top_n:
-        for event in TODAY_EVENTS:
+        backup_events = _build_industry_event_pool(boss, TODAY_EVENTS, top_n=8, min_secondary=2)
+        for event in backup_events:
             if len(selected) >= top_n:
                 break
             if not _is_online_event(event):
@@ -2145,12 +2465,16 @@ def _minimum_online_city_events(boss: dict, primary_events: list[dict], backup_e
     return selected[:top_n], city_online_count >= top_n
 
 
-def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2) -> list[dict]:
+def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2, boss: dict | None = None) -> list[dict]:
     source_weight = {
         "中国政府网政策": 30,
         "百度民生": 24,
         "百度财经": 18,
     }
+
+    boss_ref = boss or {}
+    boss_keywords = [kw.lower() for kw in boss_ref.get("keywords", [])]
+    news_prefs = _infer_boss_news_preferences(boss_ref) if boss_ref else set()
 
     deduped: list[dict] = []
     seen_titles = set()
@@ -2164,7 +2488,7 @@ def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2) -> list[d
         seen_titles.add(key)
         deduped.append(item)
 
-    scored: list[tuple[int, int, dict]] = []
+    scored: list[tuple[int, int, int, dict]] = []
     for item in deduped:
         category = str(item.get("category", ""))
         if category != "政策":
@@ -2173,16 +2497,45 @@ def _minimum_local_policy_news(news_items: list[dict], top_n: int = 2) -> list[d
         source = str(item.get("source", ""))
         weight = source_weight.get(source, 12)
         base_score = 38 + weight // 2
+        title_lower = str(item.get("title", "")).lower()
+        kw_hits = sum(1 for kw in boss_keywords if kw and kw in title_lower)
+        related_bonus = 14 if kw_hits >= 1 else 0
+        if news_prefs and category in news_prefs:
+            related_bonus += 8
+
         news_copy = {
             **item,
-            "score": max(int(item.get("score", 0) or 0), min(base_score, 70)),
-            "matched": item.get("matched") or ["本土政策"],
+            "score": max(int(item.get("score", 0) or 0), min(base_score + related_bonus, 78)),
+            "matched": item.get("matched") or ([boss_keywords[0]] if boss_keywords and kw_hits else ["本土政策"]),
             "source": source or "本土政策源",
         }
-        scored.append((weight, int(news_copy["score"]), news_copy))
+        tier = 2 if kw_hits >= 1 else 1
+        scored.append((tier, weight, int(news_copy["score"]), news_copy))
 
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    selected = [item[2] for item in scored[:top_n]]
+    scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    selected = [item[3] for item in scored[:top_n]]
+
+    # 若政策不足，补充与行业偏好一致的非政策热点
+    if len(selected) < top_n and news_prefs:
+        for item in deduped:
+            if len(selected) >= top_n:
+                break
+            category = str(item.get("category", ""))
+            title_lower = str(item.get("title", "")).lower()
+            if category == "政策" or category not in news_prefs:
+                continue
+            if boss_keywords and not any(kw in title_lower for kw in boss_keywords):
+                continue
+            if any(str(item.get("title", "")).strip() == str(s.get("title", "")).strip() for s in selected):
+                continue
+            selected.append(
+                {
+                    **item,
+                    "score": max(int(item.get("score", 0) or 0), 52),
+                    "matched": item.get("matched") or [category],
+                    "source": item.get("source") or "行业热点补位",
+                }
+            )
 
     if len(selected) < top_n:
         for item in DEFAULT_NEWS:
@@ -2393,6 +2746,10 @@ def _canonical_city_name(city_text: str) -> str:
     if not city:
         return ""
 
+    english_key = re.sub(r"[^a-z]", "", city.lower())
+    if english_key in EN_CITY_TO_CN:
+        return EN_CITY_TO_CN[english_key]
+
     if city in MAJOR_CITY_COORDS:
         return city
     if city in MAJOR_CITY_ALIASES:
@@ -2408,6 +2765,11 @@ def _canonical_city_name(city_text: str) -> str:
 
     if city.endswith("市") and city[:-1] in MAJOR_CITY_COORDS:
         return city[:-1]
+
+    for key, value in EN_CITY_TO_CN.items():
+        if key in english_key:
+            return value
+
     return city
 
 
@@ -2664,6 +3026,9 @@ def render_model_explainer(boss: dict, matched_news: list[dict]) -> None:
 
 inject_styles()
 
+if "smart_goal_seed" not in st.session_state:
+    st.session_state["smart_goal_seed"] = int(time.time())
+
 with st.sidebar:
     st.markdown("## 🧭 AI商业参谋")
     st.caption("浅色旗舰版 · Apple风格信息设计")
@@ -2681,6 +3046,7 @@ with st.sidebar:
 
     goal_input_mode = st.selectbox("目标来源", ["智能推荐筛选", "手动输入"], index=0)
     manual_goal_input = ""
+    goal_preview = st.empty()
     if goal_input_mode == "手动输入":
         manual_goal_input = st.text_input(
             "手动目标",
@@ -2689,6 +3055,9 @@ with st.sidebar:
         )
     else:
         st.caption("目标：可以手动输入或智能推荐筛选")
+    refresh_goal = st.button("刷新智能目标", use_container_width=True)
+    if refresh_goal:
+        st.session_state["smart_goal_seed"] = int(st.session_state.get("smart_goal_seed", 0)) + 1
 
     selected_boss = dict(selected_boss_base)
     if goal_input_mode == "手动输入" and manual_goal_input.strip():
@@ -2729,7 +3098,7 @@ if geo_warnings:
     live_warnings.extend(geo_warnings)
 
 if user_geo_profile.get("enabled"):
-    city = user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "未知城市"
+    city = _canonical_city_name(user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "") or "未知城市"
     region = user_geo_profile.get("region", "")
     geo_caption.caption(f"IP定位：{city}{(' · ' + region) if region else ''}（已启用1-2小时硬过滤）")
     scope_cities = user_geo_profile.get("scope_cities", [])
@@ -2741,15 +3110,15 @@ else:
     geo_caption.caption("IP定位：未识别（暂未启用1-2小时硬过滤）")
     scope_caption.caption("")
 
-manual_city = manual_city_input.strip()
+manual_city = _canonical_city_name(manual_city_input.strip())
 resolved_city = manual_city
 if not resolved_city:
-    resolved_city = str(user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "").strip()
+    resolved_city = _canonical_city_name(str(user_geo_profile.get("city") or user_geo_profile.get("nearest_major_city") or "").strip())
 if resolved_city:
     selected_boss["city"] = resolved_city
 
 hero_city_display = resolved_city or "IP识别或手动输入"
-hero_goal_hint = "可以手动输入或智能推荐筛选"
+hero_goal_hint = selected_boss.get("current_goal", "")
 
 mode_caption.caption(f"当前：实时联网模式（本土新闻/政策 + 本土活动 + IP路程硬过滤；每 {refresh_minutes} 分钟自动刷新）")
 count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
@@ -2769,31 +3138,54 @@ if refresh:
     st.toast("机会雷达已更新", icon="✨")
 
 all_news = live_news + extra_news
-matched_events = match_events_for_boss(selected_boss, live_events)
-matched_news = match_news_for_boss(selected_boss, all_news)
+industry_event_pool = _build_industry_event_pool(selected_boss, live_events, top_n=max(12, len(live_events) or 12), min_secondary=2)
+industry_news_pool = _build_industry_news_pool(selected_boss, all_news, top_n=max(24, len(all_news) or 24), min_secondary=2)
 
-if not matched_events and live_events:
-    matched_events = _fallback_event_candidates(selected_boss, live_events, top_n=3)
-    live_warnings.append("活动严格匹配结果为空，已启用同城/低出行成本宽松推荐")
+smart_goal_text = _generate_smart_goal(
+    selected_boss,
+    industry_news_pool or all_news,
+    industry_event_pool or live_events,
+    seed=int(st.session_state.get("smart_goal_seed", 0)),
+)
+if goal_input_mode == "手动输入" and manual_goal_input.strip():
+    selected_boss["current_goal"] = manual_goal_input.strip()
+else:
+    selected_boss["current_goal"] = smart_goal_text
+    goal_preview.caption("智能目标：" + smart_goal_text)
 
-if not matched_news and all_news:
-    matched_news = _fallback_news_candidates(selected_boss, all_news, top_n=4)
-    live_warnings.append("热点严格匹配结果为空，已启用行业热点宽松推荐")
+hero_goal_hint = selected_boss.get("current_goal", "")
+
+matched_events = match_events_for_boss(selected_boss, industry_event_pool or live_events)
+matched_news = match_news_for_boss(selected_boss, industry_news_pool or all_news)
+
+if not matched_events and (industry_event_pool or live_events):
+    matched_events = _fallback_event_candidates(selected_boss, industry_event_pool or live_events, top_n=3)
+    live_warnings.append("活动严格匹配结果为空，已启用行业相关宽松推荐")
+
+if not matched_news and (industry_news_pool or all_news):
+    matched_news = _fallback_news_candidates(selected_boss, industry_news_pool or all_news, top_n=4)
+    live_warnings.append("热点严格匹配结果为空，已启用行业相关宽松推荐")
 
 if not matched_events:
-    guaranteed_events, full_city_online = _minimum_online_city_events(selected_boss, live_events, TODAY_EVENTS, top_n=2)
+    backup_events = _build_industry_event_pool(selected_boss, TODAY_EVENTS, top_n=8, min_secondary=2)
+    guaranteed_events, full_city_online = _minimum_online_city_events(
+        selected_boss,
+        industry_event_pool or live_events,
+        backup_events or TODAY_EVENTS,
+        top_n=2,
+    )
     if guaranteed_events:
         matched_events = guaranteed_events
         if full_city_online:
             live_warnings.append("已启用最小展示保障：固定展示2条同城线上活动")
         else:
-            live_warnings.append("已启用最小展示保障：同城线上不足，已用全国线上活动补齐2条")
+            live_warnings.append("已启用最小展示保障：强相关不足，已用次级相关线上活动补齐2条")
 
 if not matched_news:
-    guaranteed_news = _minimum_local_policy_news(all_news + live_news + DEFAULT_NEWS, top_n=2)
+    guaranteed_news = _minimum_local_policy_news(industry_news_pool + all_news + live_news + DEFAULT_NEWS, top_n=2, boss=selected_boss)
     if guaranteed_news:
         matched_news = guaranteed_news
-        live_warnings.append("已启用最小展示保障：固定展示2条本土政策热点")
+        live_warnings.append("已启用最小展示保障：固定展示2条行业相关政策/热点")
 
 if live_warnings:
     warning_caption.caption("系统提示：" + "；".join(dict.fromkeys(live_warnings)))
