@@ -726,8 +726,8 @@ def render_timeline(actions: list[dict]) -> None:
 
 
 def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> None:
-    st.markdown("<div class='section-title'>2. 为什么值得做</div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-desc'>将证据拆开看：先看可参加活动，再看热点商机，避免信息混在一起。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title'>2. 值得做的决策拆解</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-desc'>先回答“什么值得做”，再通过热点信号回答“为什么值得做”。</div>", unsafe_allow_html=True)
 
     has_events = bool(matched_events)
     has_news = bool(matched_news)
@@ -737,7 +737,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
         return
 
     if has_events:
-        st.markdown("<div class='split-title'>活动机会</div>", unsafe_allow_html=True)
+        st.markdown("<div class='split-title'>什么值得做</div>", unsafe_allow_html=True)
         st.markdown("<div class='split-desc'>优先看今天能立刻触达的人和场景。</div>", unsafe_allow_html=True)
 
         event_cards: list[str] = []
@@ -747,7 +747,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
                 block_html(
                     f"""
                     <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
-                      <div class="wf-tag tag-event">活动机会</div>
+                                            <div class="wf-tag tag-event">什么值得做</div>
                       <div class="wf-title">{html.escape(event.get('title', '商业活动'))}</div>
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
@@ -759,12 +759,12 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
 
         st.markdown("<div class='waterfall'>" + "".join(event_cards) + "</div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div class='split-title'>活动机会</div>", unsafe_allow_html=True)
+        st.markdown("<div class='split-title'>什么值得做</div>", unsafe_allow_html=True)
         st.caption("今天暂无高匹配活动。")
 
     if has_news:
-        st.markdown("<div class='split-title'>热点商机</div>", unsafe_allow_html=True)
-        st.markdown("<div class='split-desc'>再看值得跟进的热点，形成当天可执行动作。</div>", unsafe_allow_html=True)
+        st.markdown("<div class='split-title'>为什么值得做</div>", unsafe_allow_html=True)
+        st.markdown("<div class='split-desc'>热点商机提供外部证据，说明这件事为什么现在就要做。</div>", unsafe_allow_html=True)
 
         news_cards: list[str] = []
         for idx, news in enumerate(matched_news, 1):
@@ -787,7 +787,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
 
         st.markdown("<div class='waterfall'>" + "".join(news_cards) + "</div>", unsafe_allow_html=True)
     else:
-        st.markdown("<div class='split-title'>热点商机</div>", unsafe_allow_html=True)
+        st.markdown("<div class='split-title'>为什么值得做</div>", unsafe_allow_html=True)
         st.caption("当前暂无高相关热点。")
 
 
