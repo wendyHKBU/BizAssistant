@@ -2176,7 +2176,7 @@ def _extract_official_exhibition_events(
                 "time": event_time,
                 "location": location,
                 "format": event_format,
-                "source": "local",
+                "source": "official_exhibition",
                 "source_detail": f"会展中心官网排期（{center_name}）",
                 "keywords": keywords,
                 "target_industries": industries,
@@ -2191,6 +2191,38 @@ def _extract_official_exhibition_events(
             break
 
     return collected
+
+
+def _is_official_exhibition_event(event: dict) -> bool:
+    source = str(event.get("source", "")).strip().lower()
+    detail = str(event.get("source_detail", "")).strip()
+    return source == "official_exhibition" or "会展中心官网排期" in detail or "官网排期入口" in detail
+
+
+def _build_official_exhibition_fallback_event(source: dict[str, str]) -> dict:
+    city = str(source.get("city", "")).strip() or "本地"
+    center_name = str(source.get("center", "会展中心")).strip() or "会展中心"
+    schedule_url = str(source.get("schedule_url") or source.get("site") or "").strip()
+
+    title = f"{city}{center_name}近期展会排期（官方入口）"
+    description = "来源：会展中心官网排期入口。若结构化列表未返回，可先进入官方页查看最新展会日历与报名信息。"
+    keywords, industries = _detect_event_profile(title, description)
+
+    return {
+        "title": _normalize_event_text(title, max_len=96),
+        "time": "近期",
+        "location": f"{city} · {center_name}",
+        "format": "线下",
+        "source": "official_exhibition",
+        "source_detail": f"会展中心官网排期（{center_name}） · 官网排期入口",
+        "keywords": keywords,
+        "target_industries": industries,
+        "description": description,
+        "registration_deadline": "请进入官网排期入口确认",
+        "value": "中",
+        "url": schedule_url,
+        "is_fallback": True,
+    }
 
 
 def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city: str = "") -> tuple[list[dict], list[str]]:
@@ -2209,23 +2241,34 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
     warnings: list[str] = []
     seen_titles = set()
     seen_urls = set()
+    fallback_count = 0
 
     for source in selected_sources:
         fetch_url = str(source.get("schedule_url") or source.get("site") or "").strip()
         if not fetch_url:
             continue
 
-        html_text = _safe_get_text(fetch_url, timeout=7)
-        if not html_text:
-            continue
-
         per_site_limit = EXHIBITION_CENTER_PER_SITE_LIMIT + (1 if _same_canonical_city(source.get("city", ""), preferred_city_norm) else 0)
-
-        candidates = _extract_official_exhibition_events(
-            html_text,
-            source=source,
-            max_items=per_site_limit,
+        fallback_allowed = (
+            _same_canonical_city(source.get("city", ""), preferred_city_norm)
+            if preferred_city_norm
+            else len(collected) < 3
         )
+
+        html_text = _safe_get_text(fetch_url, timeout=7)
+        candidates: list[dict] = []
+        if html_text:
+            candidates = _extract_official_exhibition_events(
+                html_text,
+                source=source,
+                max_items=per_site_limit,
+            )
+
+        if not candidates and fallback_allowed:
+            fallback_event = _build_official_exhibition_fallback_event(source)
+            if fallback_event.get("url"):
+                candidates = [fallback_event]
+
         for event in candidates:
             title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
             event_url = str(event.get("url", "")).strip()
@@ -2243,7 +2286,11 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
                 seen_urls.add(event_url)
 
             collected.append(event)
+            if event.get("is_fallback"):
+                fallback_count += 1
             if len(collected) >= max_items:
+                if fallback_count:
+                    warnings.append(f"会展中心官网结构化抓取受限，已补充 {fallback_count} 条官网排期入口直达")
                 if preferred_city_norm:
                     local_cnt = sum(1 for item in collected if _same_canonical_city(_extract_event_city(item), preferred_city_norm))
                     warnings.append(f"已按{preferred_city_norm}优先抓取会展中心官网，补充活动 {len(collected)} 条（本地{local_cnt}条）")
@@ -2252,6 +2299,8 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
                 return collected, warnings
 
     if collected:
+        if fallback_count:
+            warnings.append(f"会展中心官网结构化抓取受限，已补充 {fallback_count} 条官网排期入口直达")
         if preferred_city_norm:
             local_cnt = sum(1 for item in collected if _same_canonical_city(_extract_event_city(item), preferred_city_norm))
             warnings.append(f"已按{preferred_city_norm}优先抓取会展中心官网，补充活动 {len(collected)} 条（本地{local_cnt}条）")
@@ -3311,6 +3360,7 @@ def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
 
     event_keywords = [str(kw).lower() for kw in event.get("keywords", [])]
     event_industries = [str(ind).lower() for ind in event.get("target_industries", [])]
+    is_official_exhibition = _is_official_exhibition_event(event)
     text = (
         f"{event.get('title', '')} {event.get('description', '')} {event.get('location', '')} "
         f"{' '.join(event_keywords)} {' '.join(event_industries)}"
@@ -3332,10 +3382,15 @@ def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
     score += min(36, industry_hits * 24)
     score += len(keyword_hits) * 18
     score += len(extra_term_hits) * 8
+    if is_official_exhibition:
+        # 官方会展排期通常描述偏简短，给一个温和基线，避免被过早过滤。
+        score += 12
 
     location_text = f"{event.get('title', '')} {event.get('location', '')}"
     if city and city in location_text:
         score += 10
+        if is_official_exhibition:
+            score += 4
     if _is_online_event(event):
         score += 4
     if float(event.get("travel_hours", 9) or 9) <= MAX_TRAVEL_HOURS:
@@ -3352,13 +3407,19 @@ def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
             continue
         if any(str(marker).lower() in text for marker in markers[:4]):
             unrelated_hits += 1
-    score -= min(16, unrelated_hits * 4)
+    if is_official_exhibition:
+        score -= min(10, unrelated_hits * 3)
+    else:
+        score -= min(16, unrelated_hits * 4)
 
     if event_industries and industry_hits == 0 and not keyword_hits:
-        score -= 10
+        score -= 4 if is_official_exhibition else 10
 
     score = max(0, min(98, score))
     matched = list(dict.fromkeys(keyword_hits + extra_term_hits))[:3]
+    if not matched and is_official_exhibition:
+        city_hint = _extract_event_city(event)
+        matched = [term for term in [city_hint, "会展资源"] if term][:2]
     if not matched and event_industries:
         matched = [event_industries[0][:8]]
 
@@ -3828,6 +3889,70 @@ def _fallback_event_candidates(boss: dict, events: list[dict], top_n: int = 3) -
         selected.extend(secondary[:keep])
 
     return selected[:top_n]
+
+
+def _ensure_exhibition_event_visibility(
+    boss: dict,
+    matched_events: list[dict],
+    candidate_events: list[dict],
+    max_items: int = 3,
+) -> tuple[list[dict], bool]:
+    current = [{**item} for item in (matched_events or [])]
+    if any(_is_official_exhibition_event(event) for event in current):
+        return current[:max_items], False
+
+    seen_titles = {
+        re.sub(r"\s+", " ", str(item.get("title", "")).lower()).strip()
+        for item in current
+        if str(item.get("title", "")).strip()
+    }
+
+    official_candidates: list[tuple[int, int, tuple[int, int, int], dict]] = []
+    for event in candidate_events or []:
+        if not _is_official_exhibition_event(event):
+            continue
+
+        title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
+        if not title_key or title_key in seen_titles:
+            continue
+
+        relevance_score, matched = _event_relevance_score(boss, event)
+        if relevance_score < 0:
+            continue
+
+        tier = _event_relevance_tier(boss, event)
+        base_floor = 36 if tier <= 0 else 0
+        event_copy = {
+            **event,
+            "score": min(94, max(int(event.get("score", 0) or 0), int(relevance_score), base_floor)),
+            "matched_keywords": event.get("matched_keywords") or (matched[:3] if matched else ["会展资源"]),
+        }
+        detail = str(event_copy.get("source_detail", "会展中心官网排期")).strip()
+        if "官方入口" not in detail:
+            event_copy["source_detail"] = f"{detail} · 官方入口"
+
+        official_candidates.append((tier, int(event_copy["score"]), _event_rank_key(event_copy), event_copy))
+
+    if not official_candidates:
+        return current[:max_items], False
+
+    official_candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    best_official = official_candidates[0][3]
+
+    if len(current) < max_items:
+        current.append(best_official)
+    else:
+        ranking: list[tuple[int, int, tuple[int, int, int], int]] = []
+        for idx, event in enumerate(current):
+            tier = _event_relevance_tier(boss, event)
+            score = int(event.get("score", 0) or 0)
+            ranking.append((tier, score, _event_rank_key(event), idx))
+        ranking.sort(key=lambda item: (item[0], item[1], item[2]))
+        replace_idx = ranking[0][3]
+        current[replace_idx] = best_official
+
+    current.sort(key=lambda item: (int(item.get("score", 0) or 0), _event_rank_key(item)), reverse=True)
+    return current[:max_items], True
 
 
 def _is_online_event(event: dict) -> bool:
@@ -4721,40 +4846,102 @@ def _to_html_multiline(text: str) -> str:
 def _build_policy_action_texts(news: dict) -> dict:
     title = _normalize_event_text(str(news.get("title", "相关政策")), max_len=56)
     category = str(news.get("category", "政策")).strip() or "政策"
-    matched = "、".join(news.get("matched", [])[:2]) or category
+    matched_terms = [str(term).strip() for term in news.get("matched", []) if str(term).strip()]
+    matched = "、".join(matched_terms[:2]) or category
+    focus = matched_terms[0] if matched_terms else matched
 
-    summary = (
-        f"政策细则速读：{title}\n"
-        f"你最该看的点：{matched}相关条款、门槛条件、时间窗口。\n"
-        "建议动作：先核对是否符合条件，再准备材料，最后排申报节点。"
+    day_seed = int(datetime.now().strftime("%Y%m%d"))
+    seed = day_seed + sum(ord(ch) for ch in f"{title}|{category}|{matched}")
+    rng = random.Random(seed)
+
+    summary_templates = [
+        "政策细则速读：{title}\n重点看三件事：{matched}相关资格边界、材料清单、时间窗口。\n建议动作：今天先做资格自测，明天补材料，后天锁申报节点。",
+        "政策重点提炼：{title}\n和{matched}最相关的是门槛条件、补贴范围、申报顺序。\n建议动作：先判断能不能拿，再决定投入多少人力推进。",
+        "这条政策建议别只看标题：{title}\n真正影响结果的是{matched}对应的细则条款与截止节奏。\n建议动作：先拉一页核对表，把是否可申报讲清楚。",
+    ]
+    summary = rng.choice(summary_templates).format(title=title, matched=matched)
+
+    topic_tag = re.sub(r"\s+", "", focus)[:8] or category
+    moments_openers = [
+        "今天刷到一条{category}新动态：{title}",
+        "刚看到一条值得圈内人留意的{category}信息：{title}",
+        "这条{category}我建议别划走：{title}",
+        "给正在做业务推进的朋友报个信：{title}",
+    ]
+    moments_insights = [
+        "它和我们最近推进的{matched}方向高度相关，不是围观新闻，是真可能落地。",
+        "这条不是“看看就过”，对{matched}的节奏和预算会有直接影响。",
+        "如果你也在做{matched}，这条信息基本属于“早知道就少踩坑”的级别。",
+        "和{matched}对得上，属于可以立刻拆解动作的政策，不是空泛口号。",
+    ]
+    moments_actions = [
+        "我准备这周先把资格条件和材料清单跑一遍，能上就立刻排期。",
+        "我会先做一版1页纸决策清单：能不能报、值不值得报、谁来报。",
+        "接下来先做资格自测，再看补贴力度，最后决定是否投入申报。",
+        "这周先把流程摸透，先跑最短路径，不在无效环节耗时间。",
+    ]
+    moments_hooks = [
+        "你们更关心哪块：A资格门槛 B补贴额度 C申报流程？",
+        "如果只能先做一步，你会选资格自测还是先约政策窗口？",
+        "要不要我把关键条款做成一张图，方便你直接转给团队？",
+        "你觉得这条对{matched}是短期机会，还是长期红利？",
+    ]
+    moments_closings = [
+        "需要完整版清单的，留言“要模板”，我整理后发你。",
+        "同频的朋友可以一起复盘，我把实操踩坑点同步出来。",
+        "转给正在做{matched}的朋友，可能帮他少走一轮弯路。",
+        "我会持续跟进实操结果，有新变化再同步。",
+    ]
+    hashtag_templates = [
+        "#政策机会 #{category} #{topic_tag}",
+        "#{category}动态 #老板决策 #{topic_tag}",
+        "#实操复盘 #政策解读 #{topic_tag}",
+    ]
+
+    moments_lines = [
+        rng.choice(moments_openers).format(category=category, title=title),
+        rng.choice(moments_insights).format(matched=matched),
+        rng.choice(moments_actions),
+        rng.choice(moments_hooks).format(matched=matched),
+        rng.choice(moments_closings).format(matched=matched),
+    ]
+    if rng.random() >= 0.35:
+        moments_lines.append(rng.choice(hashtag_templates).format(category=category, topic_tag=topic_tag))
+    moments_copy = "\n".join(moments_lines)
+
+    friend_styles = [
+        {
+            "call": "姐妹",
+            "insight": "这条和你在做的{matched}挺贴，不是热闹新闻，是真能省成本。",
+            "ask": "你要不要把{focus}这块先拉个清单？我今晚帮你过一遍。",
+        },
+        {
+            "call": "家人",
+            "insight": "我看了下，这条对{matched}的节奏挺关键，越早看越占先手。",
+            "ask": "你要是愿意，我给你做个“能不能报”的快速判断版。",
+        },
+        {
+            "call": "兄弟",
+            "insight": "和你最近推进的{matched}方向对得上，感觉有搞头。",
+            "ask": "晚点我发你三条重点，你十分钟就能判断值不值。",
+        },
+        {
+            "call": "搭子",
+            "insight": "这条政策我觉得能直接影响{matched}这块，值得马上看。",
+            "ask": "要不咱俩明天抽20分钟，把材料路径一起过一遍？",
+        },
+        {
+            "call": "老板",
+            "insight": "这条对{matched}挺关键，尤其是门槛和申报窗口这两块。",
+            "ask": "我先给你做个简版判断：可申报/暂不申报/需补条件，你看这样行不行？",
+        },
+    ]
+    friend_style = friend_styles[seed % len(friend_styles)]
+    friend_note = (
+        f"{friend_style['call']}，我刚看到个政策：{title}。\n"
+        f"{friend_style['insight'].format(matched=matched)}\n"
+        f"{friend_style['ask'].format(focus=focus)}"
     )
-
-    moments_copy = (
-        f"今天刷到一条{category}信息：{title}\n"
-        f"和我最近在推进的{matched}方向挺对口，感觉这波可以认真跟一下。\n"
-        "这周先把条件和流程摸清楚，后面有进展再来同步。"
-    )
-
-    tone_bucket = ["姐妹感", "家人感", "兄弟感"]
-    tone = tone_bucket[sum(ord(ch) for ch in title) % len(tone_bucket)]
-    if tone == "姐妹感":
-        friend_note = (
-            f"姐妹，我刚看到个政策：{title}。\n"
-            f"感觉和你在做的{matched}挺搭，可能真能省下一笔。\n"
-            "你要是愿意，我今晚给你捋三条重点，咱们一起判断要不要冲。"
-        )
-    elif tone == "家人感":
-        friend_note = (
-            f"家人，我看到个新政策：{title}。\n"
-            f"跟你最近的{matched}方向挺贴，先别急，我先帮你把门槛捋清楚。\n"
-            "你看完再决定要不要上，我陪你一起算。"
-        )
-    else:
-        friend_note = (
-            f"兄弟，刚刷到个政策：{title}。\n"
-            f"和你这阵子搞的{matched}挺对口，我感觉有搞头。\n"
-            "要不我晚点发你一版简明清单，你直接看能不能上。"
-        )
 
     finance_steps = (
         "融资材料整理步骤：\n"
@@ -4843,6 +5030,8 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
             matched_kw = "、".join(event.get("matched_keywords", [])[:3]) or "行业相关"
             travel_note = event.get("travel_note", "")
             travel_line = f"<div class=\"wf-action\">到场成本：{html.escape(travel_note)}</div>" if travel_note else ""
+            source_detail = str(event.get("source_detail", "")).strip()
+            source_line = f"<div class=\"wf-action\">来源：{html.escape(source_detail)}</div>" if source_detail else ""
             event_url = _event_detail_url(event)
             deadline_text = str(event.get("registration_deadline", "尽快确认报名")).strip() or "尽快确认报名"
             deadline_line = ""
@@ -4866,6 +5055,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                                             <div class="wf-title">{html.escape(event.get('title', '商业活动'))}<a class="wf-detail-link" href="{html.escape(event_url)}" target="_blank" rel="noopener noreferrer">详见活动页</a></div>
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
+                                            {source_line}
                                             {deadline_line}
                       {travel_line}
                       {travel_entry_html}
@@ -5229,6 +5419,16 @@ if not reuse_recommendation:
         if guaranteed_news:
             matched_news = guaranteed_news
             live_warnings.append("已启用最小展示保障：固定展示2条行业相关热点")
+
+    exhibition_candidates = list(industry_event_pool or []) + list(live_events or [])
+    matched_events, exhibition_injected = _ensure_exhibition_event_visibility(
+        selected_boss,
+        matched_events,
+        exhibition_candidates,
+        max_items=3,
+    )
+    if exhibition_injected:
+        live_warnings.append("已补充1条会展中心官网活动，便于直接核验官方排期")
 
     matched_news = _attach_news_actions(matched_news, seed=refresh_bucket + int(st.session_state.get("smart_goal_seed", 0)))
     st.session_state["recommendation_cache"] = {
