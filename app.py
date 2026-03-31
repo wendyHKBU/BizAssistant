@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 import html
+import re
+import time
 import textwrap
+from urllib.parse import quote_plus
+import xml.etree.ElementTree as ET
 
+import requests
 import streamlit as st
 import streamlit.components.v1 as components
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 
 from bosses import BOSSES
 from events import TODAY_EVENTS
@@ -45,6 +56,246 @@ DEFAULT_NEWS = [
     {"id": "H14", "title": "设计行业报告：AI工具普及但创意价值仍依赖人工，报价可提升", "category": "设计"},
     {"id": "H15", "title": "广州制造业PMI连续3个月上升，订单回暖，配件需求明显", "category": "制造业"},
 ]
+
+
+NEWS_RSS_SOURCES = [
+    ("中小企业 政策", "政策"),
+    ("抖音 电商 中小商家", "电商"),
+    ("人民币 汇率 外贸", "外汇"),
+    ("企业 AI 应用", "AI科技"),
+    ("跨境电商 东南亚", "跨境电商"),
+    ("供应链 金融 中小企业", "金融"),
+    ("餐饮 连锁 商场", "餐饮"),
+    ("法律科技 律师 AI", "法律科技"),
+    ("制造业 PMI 订单", "制造业"),
+    ("新能源汽车 配件", "新能源"),
+]
+
+EVENT_RSS_QUERIES = [
+    "创业 论坛 峰会 报名",
+    "企业家 沙龙 路演 活动",
+    "跨境电商 展会 对接会",
+    "AI 产业 论坛 活动",
+    "直播电商 训练营 活动",
+]
+
+NEWS_CATEGORY_RULES = {
+    "政策": ["政策", "补贴", "实施方案", "指导意见", "工信部", "国务院"],
+    "电商": ["电商", "抖音", "直播", "小红书", "淘宝", "拼多多"],
+    "外汇": ["汇率", "人民币", "美元", "外汇"],
+    "AI科技": ["ai", "人工智能", "大模型", "deepseek", "智能体", "算法"],
+    "外贸": ["外贸", "出口", "进口", "广交会", "海外订单"],
+    "跨境电商": ["跨境", "东南亚", "出海", "shopee", "lazada"],
+    "金融": ["金融", "融资", "信贷", "银行", "供应链金融"],
+    "餐饮": ["餐饮", "连锁", "外卖", "堂食", "商场"],
+    "法律科技": ["法律", "律所", "合规", "legaltech", "律师"],
+    "设计": ["设计", "ui", "ux", "创意", "品牌设计"],
+    "制造业": ["制造业", "工厂", "订单", "pmi", "产能"],
+    "新能源": ["新能源", "新能源汽车", "电池", "光伏", "储能"],
+}
+
+EVENT_INDUSTRY_RULES = {
+    "企业培训": ["培训", "hr", "人力", "企业管理", "职业技能", "组织发展"],
+    "品牌策划": ["品牌", "营销", "内容", "私域", "新消费"],
+    "外贸": ["外贸", "跨境", "东南亚", "出海", "广交会", "供应链"],
+    "UI/UX设计": ["设计", "ui", "ux", "用户体验", "figma", "产品设计"],
+    "餐饮": ["餐饮", "连锁", "堂食", "外卖", "预制菜", "选址"],
+    "电商": ["电商", "抖音", "直播", "投流", "选款", "流量"],
+    "汽车配件": ["汽配", "汽车配件", "新能源汽车", "配件", "b2b"],
+    "HR猎头": ["招聘", "猎头", "人才", "高管", "人力"],
+    "建材": ["建材", "装修", "工程", "地产", "市政"],
+    "法律科技": ["法律", "律所", "合规", "legaltech", "融资"],
+}
+
+EVENT_MARKERS = ["峰会", "论坛", "沙龙", "路演", "训练营", "展会", "对接会", "大会", "报名", "活动"]
+
+CITY_MARKERS = ["深圳", "上海", "广州", "北京", "杭州", "成都", "武汉", "南京", "苏州", "线上"]
+
+
+def _google_rss_url(query: str) -> str:
+    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+
+
+def _strip_html_tags(text: str) -> str:
+    clean = re.sub(r"<[^>]+>", " ", text or "")
+    clean = html.unescape(clean)
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def _parse_rss_items(url: str, max_items: int = 18) -> list[dict]:
+    try:
+        response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 BizAdvisor/1.0"})
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+    except Exception:
+        return []
+
+    channel = root.find("channel")
+    if channel is None:
+        return []
+
+    items = []
+    for node in channel.findall("item")[:max_items]:
+        title = (node.findtext("title") or "").strip()
+        link = (node.findtext("link") or "").strip()
+        description = _strip_html_tags(node.findtext("description") or "")
+        pub_date = (node.findtext("pubDate") or "").strip()
+        if not title:
+            continue
+        items.append(
+            {
+                "title": title,
+                "link": link,
+                "description": description,
+                "published": pub_date,
+            }
+        )
+    return items
+
+
+def _infer_news_category(title: str, description: str, fallback: str) -> str:
+    text = f"{title} {description}".lower()
+    for category, keywords in NEWS_CATEGORY_RULES.items():
+        if any(kw.lower() in text for kw in keywords):
+            return category
+    return fallback
+
+
+def _detect_event_profile(title: str, description: str) -> tuple[list[str], list[str]]:
+    text = f"{title} {description}".lower()
+    keywords: list[str] = []
+    industries: list[str] = []
+
+    for industry, rule_keywords in EVENT_INDUSTRY_RULES.items():
+        matched = [kw for kw in rule_keywords if kw.lower() in text]
+        if matched:
+            industries.append(industry)
+            keywords.extend(matched[:2])
+
+    if not keywords:
+        keywords = ["中小企业", "增长", "合作"]
+    if not industries:
+        industries = ["企业服务"]
+
+    # 去重并保序
+    uniq_keywords = list(dict.fromkeys(keywords))[:5]
+    uniq_industries = list(dict.fromkeys(industries))[:4]
+    return uniq_keywords, uniq_industries
+
+
+def _format_event_time(pub_date: str) -> str:
+    if not pub_date:
+        return "近期"
+    try:
+        dt = parsedate_to_datetime(pub_date)
+        return dt.strftime("%m-%d 发布")
+    except Exception:
+        return "近期"
+
+
+def _infer_event_location(title: str, description: str, event_format: str) -> str:
+    text = f"{title} {description}"
+    for city in CITY_MARKERS:
+        if city in text:
+            if city == "线上":
+                return "线上活动"
+            return f"{city}（实时抓取）"
+    return "线上活动" if event_format == "线上" else "全国（实时抓取）"
+
+
+def _build_live_news(max_items: int = 24) -> list[dict]:
+    seen_titles = set()
+    news: list[dict] = []
+
+    for query, fallback_category in NEWS_RSS_SOURCES:
+        url = _google_rss_url(query)
+        for item in _parse_rss_items(url, max_items=12):
+            normalized_title = item["title"].strip()
+            if not normalized_title or normalized_title in seen_titles:
+                continue
+            seen_titles.add(normalized_title)
+
+            category = _infer_news_category(item["title"], item["description"], fallback_category)
+            news.append(
+                {
+                    "id": f"R{len(news) + 1:02d}",
+                    "title": item["title"],
+                    "category": category,
+                    "source": "Google News RSS",
+                    "published": item["published"],
+                    "url": item["link"],
+                }
+            )
+            if len(news) >= max_items:
+                return news
+
+    return news
+
+
+def _build_live_events(max_items: int = 12) -> list[dict]:
+    seen_titles = set()
+    events: list[dict] = []
+
+    for query in EVENT_RSS_QUERIES:
+        url = _google_rss_url(query)
+        for item in _parse_rss_items(url, max_items=14):
+            title = item["title"]
+            description = item["description"]
+            text = f"{title} {description}"
+            if not any(marker in text for marker in EVENT_MARKERS):
+                continue
+
+            normalized_title = title.strip()
+            if not normalized_title or normalized_title in seen_titles:
+                continue
+            seen_titles.add(normalized_title)
+
+            event_format = "线上" if any(w in text for w in ["线上", "直播", "webinar", "在线", "腾讯会议", "zoom"]) else "线下"
+            location = _infer_event_location(title, description, event_format)
+            keywords, industries = _detect_event_profile(title, description)
+            high_value = any(w in text for w in ["峰会", "论坛", "对接会", "路演", "展会"])
+
+            events.append(
+                {
+                    "id": f"rev{len(events) + 1:02d}",
+                    "title": title,
+                    "time": _format_event_time(item.get("published", "")),
+                    "location": location,
+                    "format": event_format,
+                    "source": "news",
+                    "source_detail": "Google News 活动源抓取",
+                    "keywords": keywords,
+                    "target_industries": industries,
+                    "description": description[:120] if description else "实时活动线索，建议点击原文确认细节。",
+                    "registration_deadline": "请点击原文查看最新报名信息",
+                    "value": "高" if high_value else "中",
+                    "url": item.get("link", ""),
+                }
+            )
+
+            if len(events) >= max_items:
+                return events
+
+    return events
+
+
+@st.cache_data(show_spinner=False)
+def get_realtime_feeds(refresh_bucket: int) -> tuple[list[dict], list[dict], str, list[str]]:
+    del refresh_bucket  # 作为缓存分桶键使用
+    warnings = []
+
+    live_news = _build_live_news(max_items=24)
+    if not live_news:
+        live_news = DEFAULT_NEWS.copy()
+        warnings.append("新闻源暂不可用，已自动回退到内置热点")
+
+    live_events = _build_live_events(max_items=12)
+    if not live_events:
+        live_events = TODAY_EVENTS.copy()
+        warnings.append("活动源暂不可用，已自动回退到内置活动池")
+
+    updated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return live_news, live_events, updated_at, warnings
 
 
 def block_html(template: str) -> str:
@@ -877,9 +1128,31 @@ with st.sidebar:
         height=128,
     )
 
+    st.divider()
+    refresh_minutes = st.selectbox("定时刷新频率（分钟）", [5, 10, 15, 30], index=1)
+    if st_autorefresh is not None:
+        st_autorefresh(interval=refresh_minutes * 60 * 1000, key="auto_refresh")
+
     refresh = st.button("刷新机会雷达", use_container_width=True)
-    st.caption("当前：模拟引擎（本地预览）")
-    st.caption(f"系统热点 {len(DEFAULT_NEWS)} 条 · 活动池 {len(TODAY_EVENTS)} 条")
+
+    mode_caption = st.empty()
+    count_caption = st.empty()
+    update_caption = st.empty()
+    warning_caption = st.empty()
+
+
+refresh_bucket = int(time.time() // (refresh_minutes * 60))
+if refresh:
+    get_realtime_feeds.clear()
+    st.toast("已手动刷新实时数据", icon="🔄")
+
+live_news, live_events, live_updated_at, live_warnings = get_realtime_feeds(refresh_bucket)
+
+mode_caption.caption(f"当前：实时联网模式（每 {refresh_minutes} 分钟自动刷新）")
+count_caption.caption(f"系统热点 {len(live_news)} 条 · 活动池 {len(live_events)} 条")
+update_caption.caption(f"更新时间：{live_updated_at}")
+if live_warnings:
+    warning_caption.caption("数据源降级：" + "；".join(live_warnings))
 
 
 extra_news: list[dict] = []
@@ -892,8 +1165,8 @@ if custom_news_text.strip():
 if refresh:
     st.toast("机会雷达已更新", icon="✨")
 
-all_news = DEFAULT_NEWS + extra_news
-matched_events = match_events_for_boss(selected_boss, TODAY_EVENTS)
+all_news = live_news + extra_news
+matched_events = match_events_for_boss(selected_boss, live_events)
 matched_news = match_news_for_boss(selected_boss, all_news)
 schedule = selected_boss.get("today_schedule", [])
 
