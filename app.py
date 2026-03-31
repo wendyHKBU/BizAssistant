@@ -29,6 +29,7 @@ except Exception:
 from bosses import BOSSES
 from events import TODAY_EVENTS
 from mock_advisor import (
+    ACTION_TEMPLATES,
     get_action,
     get_mirofish,
     get_network_suggestion,
@@ -2002,36 +2003,51 @@ def inject_styles() -> None:
             font-size: 0.8rem;
         }
 
-        .wf-ai-tools {
+        .wf-ai-line {
             margin-top: 0.36rem;
-            display: grid;
+            display: flex;
             gap: 0.34rem;
+            overflow-x: auto;
+            white-space: nowrap;
+            padding-bottom: 0.14rem;
+            scrollbar-width: thin;
         }
 
-        .wf-ai-item {
-            border: 1px solid rgba(15, 63, 121, 0.14);
-            border-radius: 12px;
+        .wf-ai-chip {
+            display: inline-block;
+            border: 1px solid rgba(15, 63, 121, 0.16);
+            border-radius: 999px;
             background: #f8fbff;
-            padding: 0.34rem 0.44rem;
+            padding: 0;
+            min-width: max-content;
         }
 
-        .wf-ai-item summary {
+        .wf-ai-chip summary {
             cursor: pointer;
             color: #0f3f79;
-            font-size: 0.84rem;
+            font-size: 0.8rem;
             font-weight: 700;
             list-style: none;
+            padding: 0.18rem 0.62rem;
         }
 
-        .wf-ai-item summary::-webkit-details-marker {
+        .wf-ai-chip summary::-webkit-details-marker {
             display: none;
         }
 
+        .wf-ai-chip[open] {
+            border-radius: 14px;
+            padding-bottom: 0.28rem;
+        }
+
         .wf-ai-content {
-            margin-top: 0.28rem;
+            margin-top: 0.06rem;
             color: #334155;
-            font-size: 0.84rem;
+            font-size: 0.82rem;
             line-height: 1.45;
+            white-space: normal;
+            padding: 0 0.62rem;
+            max-width: 420px;
         }
 
         .goal-preview {
@@ -3034,11 +3050,12 @@ def build_today_actions(boss: dict, matched_events: list[dict], matched_news: li
 
     if matched_news:
         top_news = matched_news[0]
+        top_action = str(top_news.get("action_text") or get_action(top_news.get("category", "政策")))
         actions.append(
             {
                 "time": "今天",
                 "priority": "中" if top_news.get("score", 0) < 70 else "高",
-                "title": f"商机动作：{get_action(top_news.get('category', '政策'))}",
+                "title": f"商机动作：{top_action}",
                 "reason": f"该动作来自「{top_news.get('title', '')[:22]}...」热点，利于当天形成可执行闭环。",
             }
         )
@@ -3050,6 +3067,49 @@ def build_today_actions(boss: dict, matched_events: list[dict], matched_news: li
             unique_titles.add(act["title"])
             deduped.append(act)
     return deduped[:6]
+
+
+def _reprioritize_actions(actions: list[dict], seed: int) -> list[dict]:
+    if not actions:
+        return []
+
+    level_map = {"低": 1, "中": 2, "高": 3}
+    reverse_map = {1: "低", 2: "中", 3: "高"}
+    updated: list[dict] = []
+
+    for idx, action in enumerate(actions):
+        action_copy = {**action}
+        title = str(action_copy.get("title", ""))
+        base_level = level_map.get(str(action_copy.get("priority", "中")), 2)
+
+        # 仅在刷新智能目标时做轻量重排，优先级变化幅度限制在 +/-1。
+        drift = ((seed + idx * 17 + sum(ord(ch) for ch in title[:6])) % 3) - 1
+        new_level = max(1, min(3, base_level + drift))
+        action_copy["priority"] = reverse_map[new_level]
+
+        reason = str(action_copy.get("reason", "")).strip()
+        if drift != 0 and reason:
+            action_copy["reason"] = reason + " 已根据最新目标节奏重排优先级。"
+        updated.append(action_copy)
+
+    updated.sort(key=lambda item: (priority_weight(item.get("priority", "低")), item.get("time", "99:99")))
+    return updated
+
+
+def _attach_news_actions(news_items: list[dict], seed: int = 0) -> list[dict]:
+    enriched: list[dict] = []
+    for idx, item in enumerate(news_items):
+        item_copy = {**item}
+        if not str(item_copy.get("action_text", "")).strip():
+            category = str(item_copy.get("category", "政策"))
+            templates = ACTION_TEMPLATES.get(category) or ACTION_TEMPLATES.get("政策", [])
+            if templates:
+                picker = random.Random(seed + idx * 31 + sum(ord(ch) for ch in str(item_copy.get("title", ""))[:12]))
+                item_copy["action_text"] = templates[picker.randrange(len(templates))]
+            else:
+                item_copy["action_text"] = get_action(category)
+        enriched.append(item_copy)
+    return enriched
 
 
 def compute_opportunity_index(schedule: list[dict], matched_events: list[dict], matched_news: list[dict]) -> tuple[int, str]:
@@ -3129,7 +3189,7 @@ def render_kpi_counter(schedule_count: int, event_count: int, news_count: int, s
     <div class="kpi-wrap">
       <div class="kpi-box"><div class="kpi-label">机会指数</div><div class="kpi-value"><span class="count" data-target="{score}">0</span><span class="kpi-suffix">/100</span></div></div>
       <div class="kpi-box"><div class="kpi-label">今日关键任务</div><div class="kpi-value"><span class="count" data-target="{schedule_count}">0</span><span class="kpi-suffix">项</span></div></div>
-      <div class="kpi-box"><div class="kpi-label">可打活动</div><div class="kpi-value"><span class="count" data-target="{event_count}">0</span><span class="kpi-suffix">个</span></div></div>
+            <div class="kpi-box"><div class="kpi-label">可执行活动</div><div class="kpi-value"><span class="count" data-target="{event_count}">0</span><span class="kpi-suffix">个</span></div></div>
       <div class="kpi-box"><div class="kpi-label">高相关热点</div><div class="kpi-value"><span class="count" data-target="{news_count}">0</span><span class="kpi-suffix">条</span></div></div>
     </div>
     <script>
@@ -3159,27 +3219,202 @@ def render_timeline(actions: list[dict]) -> None:
         st.info("当前没有可执行动作，建议先补充今日热点或切换老板画像。")
         return
 
-    rows = []
-    for idx, item in enumerate(actions, 1):
-        pri = item.get("priority", "中")
-        pri_class = "p-high" if pri == "高" else ("p-mid" if pri == "中" else "p-low")
-        rows.append(
-            block_html(
-                f"""
-                <div class="timeline-item" style="--d:{0.08 * idx:.2f}s;">
-                  <div class="timeline-top">
-                    <span class="timeline-time">{html.escape(item.get('time', '今天'))}</span>
-                    <span class="priority {pri_class}">{html.escape(pri)}优先级</span>
-                  </div>
-                  <div class="timeline-title">{html.escape(item.get('title', '执行重点任务'))}</div>
-                  <div class="timeline-note">{html.escape(item.get('reason', '围绕今日目标推进。'))}</div>
-                </div>
-                """
-            )
-        )
+    action_payload = [
+        {
+            "time": str(item.get("time", "今天")),
+            "priority": str(item.get("priority", "中")),
+            "title": str(item.get("title", "执行重点任务")),
+            "reason": str(item.get("reason", "围绕今日目标推进。")),
+        }
+        for item in actions
+    ]
 
-    block = "<div class='timeline'>" + "".join(rows) + "</div>"
-    st.markdown(block, unsafe_allow_html=True)
+    html_block = f"""
+    <style>
+        .gesture-tip {{
+            color:#667085;
+            font-size:12px;
+            margin: 0 0 8px 2px;
+        }}
+        .gesture-wrap {{
+            position: relative;
+            padding-left: 1.12rem;
+        }}
+        .gesture-wrap::before {{
+            content:"";
+            position:absolute;
+            left:0.23rem;
+            top:0.2rem;
+            bottom:0.2rem;
+            width:2px;
+            background:linear-gradient(180deg, rgba(15,63,121,0.4), rgba(31,159,152,0.32));
+        }}
+        .gesture-item {{
+            position: relative;
+            margin-bottom: 10px;
+            background: #ffffff;
+            border: 1px solid rgba(15,63,121,0.1);
+            border-radius: 16px;
+            padding: 10px 12px;
+            box-shadow: 0 10px 24px rgba(15, 63, 121, 0.07);
+            user-select:none;
+            touch-action: pan-y;
+        }}
+        .gesture-item::before {{
+            content:"";
+            position:absolute;
+            left:-1.03rem;
+            top:0.84rem;
+            width:11px;
+            height:11px;
+            border-radius:50%;
+            border:2px solid #0f3f79;
+            background:#fff;
+            box-shadow:0 0 0 3px rgba(15,63,121,0.1);
+        }}
+        .gesture-top {{
+            display:flex;
+            justify-content:space-between;
+            gap:8px;
+            align-items:center;
+            margin-bottom:4px;
+        }}
+        .gesture-time {{
+            color:#0f3f79;
+            font-weight:700;
+            font-size:15px;
+        }}
+        .gesture-title {{
+            color:#1f2937;
+            font-weight:700;
+            margin-bottom:3px;
+        }}
+        .gesture-note {{
+            color:#6e6e73;
+            font-size:13px;
+            line-height:1.45;
+        }}
+        .gesture-pri {{
+            border-radius:999px;
+            font-size:12px;
+            font-weight:700;
+            padding:2px 8px;
+        }}
+        .p-high {{ color:#b42318; background:#ffe6e2; border:1px solid #ffc3bb; }}
+        .p-mid {{ color:#8d5f10; background:#fff4dd; border:1px solid #f4deb0; }}
+        .p-low {{ color:#0e766f; background:#e5f8f4; border:1px solid #bdece3; }}
+        .gesture-hint {{
+            color:#0f6d67;
+            font-size:12px;
+            margin-top:2px;
+        }}
+    </style>
+    <div class="gesture-tip">手势操作：右滑新增日程，左滑删除日程，长按切换优先级（高/中/低）。</div>
+    <div id="gesture-timeline" class="gesture-wrap"></div>
+    <div id="gesture-hint" class="gesture-hint"></div>
+    <script>
+        const root = document.getElementById('gesture-timeline');
+        const hint = document.getElementById('gesture-hint');
+        let items = {json.dumps(action_payload, ensure_ascii=False)};
+
+        const priClass = (p) => p === '高' ? 'p-high' : (p === '低' ? 'p-low' : 'p-mid');
+        const esc = (s) => String(s || '').replace(/[&<>"']/g, (m) => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[m]));
+
+        function showHint(text) {{
+            hint.textContent = text;
+            setTimeout(() => {{
+                if (hint.textContent === text) hint.textContent = '';
+            }}, 1800);
+        }}
+
+        function cyclePriority(current) {{
+            if (current === '高') return '中';
+            if (current === '中') return '低';
+            return '高';
+        }}
+
+        function render() {{
+            root.innerHTML = '';
+            items.forEach((item, idx) => {{
+                const card = document.createElement('div');
+                card.className = 'gesture-item';
+                card.innerHTML = `
+                    <div class="gesture-top">
+                        <span class="gesture-time">${{esc(item.time)}}</span>
+                        <span class="gesture-pri ${{priClass(item.priority)}}">${{esc(item.priority)}}优先级</span>
+                    </div>
+                    <div class="gesture-title">${{esc(item.title)}}</div>
+                    <div class="gesture-note">${{esc(item.reason)}}</div>
+                `;
+
+                let startX = 0;
+                let moved = false;
+                let longPressTimer = null;
+
+                card.addEventListener('touchstart', (e) => {{
+                    startX = e.touches[0].clientX;
+                    moved = false;
+                    longPressTimer = setTimeout(() => {{
+                        items[idx].priority = cyclePriority(items[idx].priority || '中');
+                        render();
+                        showHint('已长按调整优先级');
+                    }}, 560);
+                }}, {{passive:true}});
+
+                card.addEventListener('touchmove', (e) => {{
+                    const delta = e.touches[0].clientX - startX;
+                    if (Math.abs(delta) > 14) moved = true;
+                    if (moved && longPressTimer) {{
+                        clearTimeout(longPressTimer);
+                        longPressTimer = null;
+                    }}
+                }}, {{passive:true}});
+
+                card.addEventListener('touchend', (e) => {{
+                    if (longPressTimer) {{
+                        clearTimeout(longPressTimer);
+                        longPressTimer = null;
+                    }}
+
+                    const endX = (e.changedTouches && e.changedTouches[0]) ? e.changedTouches[0].clientX : startX;
+                    const deltaX = endX - startX;
+
+                    if (deltaX > 72) {{
+                        const newItem = {{
+                            time: '今天',
+                            priority: '中',
+                            title: '新增日程（右滑创建）',
+                            reason: '可继续编辑：补充对象、时间和目标结果。',
+                        }};
+                        items.splice(idx + 1, 0, newItem);
+                        render();
+                        showHint('已右滑新增日程');
+                    }} else if (deltaX < -72) {{
+                        if (items.length > 1) {{
+                            items.splice(idx, 1);
+                            render();
+                            showHint('已左滑删除日程');
+                        }} else {{
+                            showHint('至少保留1条日程');
+                        }}
+                    }}
+                }}, {{passive:true}});
+
+                card.addEventListener('dblclick', () => {{
+                    items[idx].priority = cyclePriority(items[idx].priority || '中');
+                    render();
+                    showHint('已切换优先级');
+                }});
+
+                root.appendChild(card);
+            }});
+        }}
+
+        render();
+    </script>
+    """
+    height = max(320, min(760, 160 + len(actions) * 116))
+    components.html(html_block, height=height, scrolling=True)
 
 
 def _safe_target_city_name(event: dict) -> str:
@@ -3347,26 +3582,106 @@ def _build_policy_action_texts(news: dict) -> dict:
     matched = "、".join(news.get("matched", [])[:2]) or category
 
     summary = (
-        f"1) 政策核心：{title}。\n"
-        f"2) 对你最相关：重点关注{matched}方向的扶持/监管变化。\n"
-        "3) 本周建议：先确认适用条件，再准备申报或业务调整清单。"
+        f"政策细则速读：{title}\n"
+        f"你最该看的点：{matched}相关条款、门槛条件、时间窗口。\n"
+        "建议动作：先核对是否符合条件，再准备材料，最后排申报节点。"
     )
+
     moments_copy = (
-        f"【{category}速递】{title}\n"
-        f"和我们当前的{matched}方向高度相关，窗口期很短。\n"
-        "这周会先做适配评估，欢迎同行交流。"
+        f"今天刷到一条{category}信息：{title}\n"
+        f"和我最近在推进的{matched}方向挺对口，感觉这波可以认真跟一下。\n"
+        "这周先把条件和流程摸清楚，后面有进展再来同步。"
     )
-    friend_note = (
-        f"给你同步一条可能有用的信息：{title}。\n"
-        f"我看和你最近在做的{matched}比较相关，\n"
-        "要不要我整理一版可执行清单发你？"
+
+    tone_bucket = ["姐妹感", "家人感", "兄弟感"]
+    tone = tone_bucket[sum(ord(ch) for ch in title) % len(tone_bucket)]
+    if tone == "姐妹感":
+        friend_note = (
+            f"姐妹，我刚看到个政策：{title}。\n"
+            f"感觉和你在做的{matched}挺搭，可能真能省下一笔。\n"
+            "你要是愿意，我今晚给你捋三条重点，咱们一起判断要不要冲。"
+        )
+    elif tone == "家人感":
+        friend_note = (
+            f"家人，我看到个新政策：{title}。\n"
+            f"跟你最近的{matched}方向挺贴，先别急，我先帮你把门槛捋清楚。\n"
+            "你看完再决定要不要上，我陪你一起算。"
+        )
+    else:
+        friend_note = (
+            f"兄弟，刚刷到个政策：{title}。\n"
+            f"和你这阵子搞的{matched}挺对口，我感觉有搞头。\n"
+            "要不我晚点发你一版简明清单，你直接看能不能上。"
+        )
+
+    finance_steps = (
+        "融资材料整理步骤：\n"
+        "1) 导出近3个月对公流水与回单；\n"
+        "2) 整理近3个月营收/成本/净利润；\n"
+        "3) 汇总应收应付与存货；\n"
+        "4) 准备营业执照、纳税记录、主要合同；\n"
+        "5) 打包成一份资料包并标注更新日期。"
     )
+
+    cashflow_steps = (
+        "现金流测算步骤：\n"
+        "1) 先算当前月净现金流 = 现金流入 - 现金流出；\n"
+        "2) 假设融资后新增月利息和还款额；\n"
+        "3) 重算融资后月净现金流；\n"
+        "4) 对比两者差值，得到现金流改善额度。"
+    )
+
+    finance_service = "需要客服协助整理？可留言：客服协助-融资材料-联系方式，我们会优先安排专员。"
+    cashflow_service = "需要专员协助测算？可留言：客服协助-现金流测算-联系方式，我们会优先安排支持。"
 
     return {
         "summary": summary,
         "moments": moments_copy,
         "friend": friend_note,
+        "finance_steps": finance_steps,
+        "cashflow_steps": cashflow_steps,
+        "finance_service": finance_service,
+        "cashflow_service": cashflow_service,
     }
+
+
+def _build_action_tool_items(action_text: str, news: dict) -> list[dict]:
+    action = str(action_text or "")
+    text_bank = _build_policy_action_texts(news)
+    items: list[dict] = []
+    seen_labels = set()
+
+    def add_item(label: str, key: str) -> None:
+        if label in seen_labels:
+            return
+        content = str(text_bank.get(key, "")).strip()
+        if not content:
+            return
+        seen_labels.add(label)
+        items.append({"label": label, "content": content})
+
+    if any(marker in action for marker in ["政策", "细则", "申请条件", "申请资格", "补贴", "监管"]):
+        add_item("政策细则摘要", "summary")
+
+    if any(marker in action for marker in ["朋友圈", "小红书", "发一条", "内容", "分享"]):
+        add_item("朋友圈文案", "moments")
+
+    if any(marker in action for marker in ["朋友", "客户", "联系", "转发", "询问"]):
+        add_item("好友通知文案", "friend")
+
+    if any(marker in action for marker in ["流水", "融资", "信贷", "申请材料", "银行"]):
+        add_item("融资材料整理步骤", "finance_steps")
+        add_item("联系客服协助整理", "finance_service")
+
+    if any(marker in action for marker in ["现金流", "改善多少", "测算", "计算"]):
+        add_item("现金流测算步骤", "cashflow_steps")
+        add_item("联系客服协助测算", "cashflow_service")
+
+    if not items:
+        add_item("政策细则摘要", "summary")
+        add_item("朋友圈文案", "moments")
+
+    return items
 
 
 def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_geo_profile: dict | None = None) -> None:
@@ -3430,9 +3745,13 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
         for idx, news in enumerate(matched_news, 1):
             score = int(news.get("score", 0))
             matched_kw = "、".join(news.get("matched", [])[:2]) or news.get("category", "资讯")
-            action = get_action(news.get("category", "政策"))
+            action = str(news.get("action_text") or get_action(news.get("category", "政策")))
             news_url = _news_detail_url(news)
-            action_texts = _build_policy_action_texts(news)
+            tool_items = _build_action_tool_items(action, news)
+            tool_line = "".join(
+                f'<details class="wf-ai-chip"><summary>{html.escape(item["label"])}</summary><div class="wf-ai-content">{_to_html_multiline(item["content"])}</div></details>'
+                for item in tool_items
+            )
             news_cards.append(
                 block_html(
                     f"""
@@ -3442,20 +3761,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                       <div class="wf-meta">相关度 {score} 分 ｜ 类别：{html.escape(news.get('category', '资讯'))} ｜ 关键词：{html.escape(matched_kw)}</div>
                       <div class="wf-reason">机会解释：该热点与当前业务路径有直接连接，具备短期转化可能。</div>
                       <div class="wf-action">{html.escape(action)}</div>
-                      <div class="wf-ai-tools">
-                        <details class="wf-ai-item">
-                          <summary>一键生成政策细则摘要</summary>
-                          <div class="wf-ai-content">{_to_html_multiline(action_texts['summary'])}</div>
-                        </details>
-                        <details class="wf-ai-item">
-                          <summary>一键生成朋友圈文案</summary>
-                          <div class="wf-ai-content">{_to_html_multiline(action_texts['moments'])}</div>
-                        </details>
-                        <details class="wf-ai-item">
-                          <summary>一键生成好友通知文案</summary>
-                          <div class="wf-ai-content">{_to_html_multiline(action_texts['friend'])}</div>
-                        </details>
-                      </div>
+                      <div class="wf-ai-line">{tool_line}</div>
                     </article>
                     """
                 )
@@ -3467,15 +3773,18 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
         st.caption("当前暂无高相关热点。")
 
 
-def render_model_explainer(boss: dict, matched_news: list[dict]) -> None:
+def render_model_explainer(boss: dict, matched_news: list[dict], seed: int = 0) -> None:
     st.markdown("<div class='split-title'>商机推演</div>", unsafe_allow_html=True)
-    st.markdown("<div class='split-desc'>最后再看模型层：给你一个联系人建议和MiroFish推演，辅助判断推进节奏。</div>", unsafe_allow_html=True)
+    st.markdown("<div class='split-desc'>给你一个联系人建议和商机推演，辅助判断推进节奏。</div>", unsafe_allow_html=True)
 
     if not matched_news:
         st.info("暂无可解释的高相关热点，模型推演暂不触发。")
         return
 
-    top_news = matched_news[0]
+    pivot = 0
+    if len(matched_news) > 1 and seed:
+        pivot = abs(int(seed)) % len(matched_news)
+    top_news = matched_news[pivot]
     network = get_network_suggestion(boss, top_news)
     relevance = "高相关" if top_news.get("score", 0) >= 60 else "中相关"
     miro = get_mirofish(top_news, relevance)
@@ -3543,6 +3852,8 @@ if "live_context_cache" not in st.session_state:
     st.session_state["live_context_cache"] = {}
 if "last_auto_goal" not in st.session_state:
     st.session_state["last_auto_goal"] = ""
+if "recommendation_cache" not in st.session_state:
+    st.session_state["recommendation_cache"] = {}
 
 with st.sidebar:
     st.markdown("## 🧭 AI商业参谋")
@@ -3711,37 +4022,70 @@ else:
 
 hero_goal_hint = _goal_headline_text(selected_boss.get("current_goal", ""))
 
-matched_events = match_events_for_boss(selected_boss, industry_event_pool or live_events)
-matched_news = match_news_for_boss(selected_boss, industry_news_pool or all_news)
+recommendation_key = json.dumps(
+    {
+        "boss": selected_label,
+        "city": resolved_city,
+        "custom_news": custom_news_text.strip(),
+        "refresh_bucket": refresh_bucket,
+        "goal_mode": goal_input_mode,
+        "manual_goal": manual_goal_input.strip(),
+    },
+    ensure_ascii=False,
+    sort_keys=True,
+)
 
-if not matched_events and (industry_event_pool or live_events):
-    matched_events = _fallback_event_candidates(selected_boss, industry_event_pool or live_events, top_n=3)
-    live_warnings.append("活动严格匹配结果为空，已启用行业相关宽松推荐")
+reco_cache = st.session_state.get("recommendation_cache") or {}
+reuse_recommendation = bool(refresh_goal and not refresh and reco_cache.get("key") == recommendation_key)
 
-if not matched_news and (industry_news_pool or all_news):
-    matched_news = _fallback_news_candidates(selected_boss, industry_news_pool or all_news, top_n=4)
-    live_warnings.append("热点严格匹配结果为空，已启用行业相关宽松推荐")
+if reuse_recommendation:
+    matched_events = [{**item} for item in (reco_cache.get("matched_events") or [])]
+    matched_news = [{**item} for item in (reco_cache.get("matched_news") or [])]
+    matched_news = _attach_news_actions(matched_news, seed=int(st.session_state.get("smart_goal_seed", 0)))
+    if matched_events or matched_news:
+        st.toast("已极速刷新：仅重排任务优先级与商机推演", icon="⚡")
+    else:
+        reuse_recommendation = False
 
-if not matched_events:
-    backup_events = _build_industry_event_pool(selected_boss, TODAY_EVENTS, top_n=8, min_secondary=2)
-    guaranteed_events, full_city_online = _minimum_online_city_events(
-        selected_boss,
-        industry_event_pool or live_events,
-        backup_events or TODAY_EVENTS,
-        top_n=2,
-    )
-    if guaranteed_events:
-        matched_events = guaranteed_events
-        if full_city_online:
-            live_warnings.append("已启用最小展示保障：固定展示2条同城线上活动")
-        else:
-            live_warnings.append("已启用最小展示保障：强相关不足，已用次级相关线上活动补齐2条")
+if not reuse_recommendation:
+    matched_events = match_events_for_boss(selected_boss, industry_event_pool or live_events)
+    matched_news = match_news_for_boss(selected_boss, industry_news_pool or all_news)
 
-if not matched_news:
-    guaranteed_news = _minimum_local_policy_news(industry_news_pool + all_news + live_news + DEFAULT_NEWS, top_n=2, boss=selected_boss)
-    if guaranteed_news:
-        matched_news = guaranteed_news
-        live_warnings.append("已启用最小展示保障：固定展示2条行业相关政策/热点")
+    if not matched_events and (industry_event_pool or live_events):
+        matched_events = _fallback_event_candidates(selected_boss, industry_event_pool or live_events, top_n=3)
+        live_warnings.append("活动严格匹配结果为空，已启用行业相关宽松推荐")
+
+    if not matched_news and (industry_news_pool or all_news):
+        matched_news = _fallback_news_candidates(selected_boss, industry_news_pool or all_news, top_n=4)
+        live_warnings.append("热点严格匹配结果为空，已启用行业相关宽松推荐")
+
+    if not matched_events:
+        backup_events = _build_industry_event_pool(selected_boss, TODAY_EVENTS, top_n=8, min_secondary=2)
+        guaranteed_events, full_city_online = _minimum_online_city_events(
+            selected_boss,
+            industry_event_pool or live_events,
+            backup_events or TODAY_EVENTS,
+            top_n=2,
+        )
+        if guaranteed_events:
+            matched_events = guaranteed_events
+            if full_city_online:
+                live_warnings.append("已启用最小展示保障：固定展示2条同城线上活动")
+            else:
+                live_warnings.append("已启用最小展示保障：强相关不足，已用次级相关线上活动补齐2条")
+
+    if not matched_news:
+        guaranteed_news = _minimum_local_policy_news(industry_news_pool + all_news + live_news + DEFAULT_NEWS, top_n=2, boss=selected_boss)
+        if guaranteed_news:
+            matched_news = guaranteed_news
+            live_warnings.append("已启用最小展示保障：固定展示2条行业相关政策/热点")
+
+    matched_news = _attach_news_actions(matched_news, seed=refresh_bucket + int(st.session_state.get("smart_goal_seed", 0)))
+    st.session_state["recommendation_cache"] = {
+        "key": recommendation_key,
+        "matched_events": [{**item} for item in matched_events],
+        "matched_news": [{**item} for item in matched_news],
+    }
 
 if live_warnings:
     warning_caption.caption("系统提示：" + "；".join(dict.fromkeys(live_warnings)))
@@ -3751,6 +4095,8 @@ schedule = selected_boss.get("today_schedule", [])
 today_str = datetime.now().strftime("%Y年%m月%d日")
 score, score_label = compute_opportunity_index(schedule, matched_events, matched_news)
 actions = build_today_actions(selected_boss, matched_events, matched_news)
+if refresh_goal and not refresh:
+    actions = _reprioritize_actions(actions, seed=int(st.session_state.get("smart_goal_seed", 0)))
 
 render_hero(selected_boss, score, score_label, today_str, hero_city_display, hero_goal_hint)
 
@@ -3763,6 +4109,7 @@ render_kpi_counter(
 
 render_timeline(actions)
 render_why_cards(matched_events, matched_news, user_geo_profile=user_geo_profile)
-render_model_explainer(selected_boss, matched_news)
+model_seed = int(st.session_state.get("smart_goal_seed", 0)) if (refresh_goal and not refresh) else 0
+render_model_explainer(selected_boss, matched_news, seed=model_seed)
 
 st.markdown("<div class='footer-note'>AI商业参谋 版权所有 盗版必究</div>", unsafe_allow_html=True)
