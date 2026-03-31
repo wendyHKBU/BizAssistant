@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+import hashlib
 import html
 import ipaddress
+import json
 import math
 import os
+import random
 import re
 import time
 import textwrap
@@ -69,6 +72,34 @@ LOCAL_NEWS_RSS_SOURCES = [
     ("钛媒体", "https://www.tmtpost.com/rss.xml", "AI科技"),
 ]
 
+POLICY_NEWS_RSS_SOURCES = [
+    ("中国政府网政策", "https://www.gov.cn/zhengce/"),
+    ("百度民生", "https://news.baidu.com/n?cmd=4&class=civilnews&tn=rss"),
+]
+
+SINA_ROLL_API_URL = "https://feed.mix.sina.com.cn/api/roll/get"
+SINA_POLICY_ROLL_LIDS = [1686, 1687]
+SINA_POLICY_TITLE_MARKERS = [
+    "政策",
+    "国务院",
+    "财政",
+    "税",
+    "监管",
+    "发改委",
+    "央行",
+    "人民银行",
+    "金融监管",
+    "社保",
+    "补贴",
+    "消费",
+    "投资",
+    "外贸",
+    "中小企业",
+]
+
+HUODONGJIA_EVENT_API_URL = "https://www.huodongjia.com/api/v1/event/info/list"
+HUODONGJIA_SIGN_SALT = "huodongjia_v2_salt_888"
+
 GOOGLE_NEWS_QUERIES = [
     ("中小企业 政策", "政策"),
     ("抖音 电商 中小商家", "电商"),
@@ -88,6 +119,15 @@ LOCAL_EVENT_KEYWORDS = [
     "AI 论坛",
     "产业展会",
     "投融资路演",
+]
+
+HUODONGJIA_EVENT_KEYWORDS = [
+    "会议",
+    "论坛",
+    "峰会",
+    "商务",
+    "创业",
+    "培训",
 ]
 
 EVENT_API_QUERIES = [
@@ -197,6 +237,29 @@ MAJOR_CITY_ALIASES = {
     "东莞市": "东莞",
     "佛山市": "佛山",
     "济南市": "济南",
+}
+
+CITY_12306_STATION_CODES = {
+    "北京": "BJP",
+    "上海": "SHH",
+    "广州": "GZQ",
+    "深圳": "SZQ",
+    "杭州": "HZH",
+    "南京": "NJH",
+    "苏州": "SZH",
+    "成都": "CDW",
+    "重庆": "CQW",
+    "武汉": "WHN",
+    "西安": "XAY",
+    "天津": "TJP",
+    "长沙": "CSQ",
+    "郑州": "ZZF",
+    "青岛": "QDK",
+    "宁波": "NGH",
+    "厦门": "XMS",
+    "合肥": "HFH",
+    "福州": "FZS",
+    "济南": "JNK",
 }
 
 MAX_TRAVEL_HOURS = 2.0
@@ -387,6 +450,27 @@ def _safe_api_get_json(url: str, *, params: dict | None = None, headers: dict | 
         return None
 
 
+def _safe_api_post_json(
+    url: str,
+    *,
+    payload: dict | None = None,
+    headers: dict | None = None,
+    timeout: int = 14,
+) -> dict | None:
+    try:
+        response = requests.post(
+            url,
+            json=payload or {},
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=True,
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
 def _is_public_ip(ip_text: str) -> bool:
     try:
         ip_obj = ipaddress.ip_address(ip_text)
@@ -523,14 +607,17 @@ def _estimate_trip(distance_km: float) -> dict:
         mode = "市内交通"
         travel_hours = max(0.35, 0.25 + distance_km / 35)
         transport_cost = max(12.0, distance_km * 2.2)
+        highway_toll = 0.0
     elif distance_km <= 260:
         mode = "高铁/城际交通"
         travel_hours = 0.65 + distance_km / 210
         transport_cost = 35.0 + distance_km * 0.48
+        highway_toll = max(8.0, distance_km * 0.28)
     else:
         mode = "航班+地面交通"
         travel_hours = 2.3 + distance_km / 650
         transport_cost = 260.0 + distance_km * 0.8
+        highway_toll = max(18.0, distance_km * 0.22)
 
     time_cost = travel_hours * TIME_VALUE_PER_HOUR_RMB
     total_cost = transport_cost + time_cost
@@ -539,6 +626,7 @@ def _estimate_trip(distance_km: float) -> dict:
         "travel_hours": round(travel_hours, 2),
         "distance_km": round(distance_km, 1),
         "transport_cost_rmb": round(transport_cost, 0),
+        "highway_toll_rmb": round(highway_toll, 0),
         "time_cost_rmb": round(time_cost, 0),
         "total_trip_cost_rmb": round(total_cost, 0),
     }
@@ -585,10 +673,11 @@ def _attach_online_trip_fields(event: dict) -> dict:
     event_copy["travel_hours"] = 0.0
     event_copy["distance_km"] = 0.0
     event_copy["transport_cost_rmb"] = 0.0
+    event_copy["highway_toll_rmb"] = 0.0
     event_copy["time_cost_rmb"] = 0.0
     event_copy["total_trip_cost_rmb"] = 0.0
     event_copy["travel_brief"] = "线上参加，交通成本≈¥0"
-    event_copy["travel_note"] = "线上参加，交通成本约 ¥0，时间成本为通勤 0 小时。"
+    event_copy["travel_note"] = "线上参加，交通约 ¥0，高速过路费约 ¥0。"
     return event_copy
 
 
@@ -639,7 +728,7 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
         event_copy["travel_brief"] = f"单程 {trip['travel_hours']:.1f} 小时，交通约 ¥{trip['transport_cost_rmb']:.0f}"
         event_copy["travel_note"] = (
             f"单程约 {trip['travel_hours']:.1f} 小时（{trip['travel_mode']}），"
-            f"交通约 ¥{trip['transport_cost_rmb']:.0f}，时间成本约 ¥{trip['time_cost_rmb']:.0f}。"
+            f"交通约 ¥{trip['transport_cost_rmb']:.0f}，高速过路费约 ¥{trip['highway_toll_rmb']:.0f}。"
         )
 
         if event_city in allowed_cities and trip["travel_hours"] <= max_travel_hours:
@@ -668,6 +757,8 @@ def apply_ip_proximity_filter(events: list[dict], max_travel_hours: float = MAX_
         "region": geo.get("region", ""),
         "country": geo.get("country", ""),
         "provider": geo.get("provider", ""),
+        "lat": user_lat,
+        "lon": user_lon,
         "nearest_major_city": nearest_city.get("city", ""),
         "nearest_major_city_distance_km": nearest_city.get("distance_km", 0),
         "scope_cities": [item["city"] for item in city_scope[:8]],
@@ -714,6 +805,109 @@ def _build_google_news_fallback(max_items: int = 16) -> list[dict]:
     return news
 
 
+def _policy_news_title_hit(title: str) -> bool:
+    return any(marker in title for marker in SINA_POLICY_TITLE_MARKERS)
+
+
+def _parse_sina_policy_items(max_items: int = 10) -> list[dict]:
+    collected: list[dict] = []
+    seen_titles = set()
+    request_headers = {"User-Agent": "Mozilla/5.0 BizAdvisor/1.0"}
+
+    for lid in SINA_POLICY_ROLL_LIDS:
+        payload = _safe_api_get_json(
+            SINA_ROLL_API_URL,
+            params={"pageid": 155, "lid": lid, "num": 24, "page": 1},
+            headers=request_headers,
+        )
+        result = (payload or {}).get("result") or {}
+        status = (result.get("status") or {}).get("code")
+        if status != 0:
+            continue
+
+        for raw in result.get("data") or []:
+            title = _clean_html_text(str(raw.get("title") or ""))
+            if not title or title in seen_titles or not _policy_news_title_hit(title):
+                continue
+
+            link = str(raw.get("url") or raw.get("wapurl") or "").strip()
+            if not link:
+                continue
+
+            published = ""
+            ctime = raw.get("ctime") or raw.get("intime")
+            try:
+                published = datetime.fromtimestamp(int(ctime)).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                published = ""
+
+            seen_titles.add(title)
+            collected.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "description": "新浪财经实时滚动（政策/宏观）",
+                    "published": published,
+                }
+            )
+            if len(collected) >= max_items:
+                return collected
+
+    return collected
+
+
+def _build_policy_only_news(max_items: int = 8) -> list[dict]:
+    seen_titles = set()
+    news: list[dict] = []
+
+    for source_name, source_url in POLICY_NEWS_RSS_SOURCES:
+        if source_name == "中国政府网政策":
+            items = _parse_gov_policy_items(source_url, max_items=18)
+        else:
+            items = _parse_rss_items(source_url, max_items=18)
+
+        for item in items:
+            title = item.get("title", "").strip()
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+
+            news.append(
+                {
+                    "id": f"R{len(news) + 1:02d}",
+                    "title": title,
+                    "category": "政策",
+                    "source": source_name,
+                    "published": item.get("published", ""),
+                    "url": item.get("link", ""),
+                }
+            )
+            if len(news) >= max_items:
+                return news
+
+    sina_items = _parse_sina_policy_items(max_items=max_items)
+    for item in sina_items:
+        title = item.get("title", "").strip()
+        if not title or title in seen_titles:
+            continue
+        seen_titles.add(title)
+
+        news.append(
+            {
+                "id": f"R{len(news) + 1:02d}",
+                "title": title,
+                "category": "政策",
+                "source": "新浪财经（实时）",
+                "published": item.get("published", ""),
+                "url": item.get("link", ""),
+            }
+        )
+        if len(news) >= max_items:
+            break
+
+    return news
+
+
 def _build_local_news(max_items: int = 24) -> list[dict]:
     seen_titles = set()
     news: list[dict] = []
@@ -751,29 +945,29 @@ def _build_local_news(max_items: int = 24) -> list[dict]:
 
 
 def _build_live_news(max_items: int = 24) -> list[dict]:
-    local_news = _build_local_news(max_items=max_items)
-    if len(local_news) >= max_items:
-        return local_news[:max_items]
-
+    policy_quota = min(max_items, max(6, max_items // 3))
+    policy_news = _build_policy_only_news(max_items=policy_quota)
+    local_news = _build_local_news(max_items=max_items * 2)
     fallback_news = _build_google_news_fallback(max_items=max_items)
-    if not local_news:
-        return fallback_news[:max_items]
 
-    seen_titles = {item["title"].strip() for item in local_news}
-    merged = list(local_news)
+    merged: list[dict] = []
+    seen_titles = set()
 
-    for item in fallback_news:
-        title = item["title"].strip()
-        if not title or title in seen_titles:
-            continue
-        seen_titles.add(title)
-        merged.append(item)
+    for batch in [policy_news, local_news, fallback_news]:
+        for item in batch:
+            title = item.get("title", "").strip()
+            if not title or title in seen_titles:
+                continue
+            seen_titles.add(title)
+            merged.append(item)
+            if len(merged) >= max_items:
+                break
         if len(merged) >= max_items:
             break
 
-    for i, item in enumerate(merged, 1):
+    for i, item in enumerate(merged[:max_items], 1):
         item["id"] = f"R{i:02d}"
-    return merged
+    return merged[:max_items]
 
 
 def _event_from_eventbrite(raw_event: dict) -> dict | None:
@@ -959,6 +1153,128 @@ def _extract_huodongxing_quick_events(html_text: str, keyword: str) -> list[dict
     return events
 
 
+def _stable_json_data(raw: object) -> object:
+    if isinstance(raw, dict):
+        return {key: _stable_json_data(raw[key]) for key in sorted(raw)}
+    if isinstance(raw, list):
+        return [_stable_json_data(item) for item in raw]
+    return raw
+
+
+def _build_huodongjia_signature(payload: dict | None = None) -> dict:
+    payload_text = ""
+    if payload:
+        payload_text = json.dumps(_stable_json_data(payload), ensure_ascii=False, separators=(",", ":"))
+
+    timestamp = str(int(time.time() * 1000))
+    nonce = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=12))
+    signature_base = f"{payload_text}{timestamp}{nonce}{HUODONGJIA_SIGN_SALT}"
+    signature = hashlib.md5(signature_base.encode("utf-8")).hexdigest()
+
+    return {
+        "X-Timestamp": timestamp,
+        "X-Nonce": nonce,
+        "X-Signature": signature,
+    }
+
+
+def _event_from_huodongjia(raw_event: dict, keyword: str) -> dict | None:
+    title = _normalize_event_text(raw_event.get("event_name", ""), max_len=90)
+    if not title:
+        return None
+
+    begin_time = str(raw_event.get("begin_time") or "")
+    city_name = _normalize_event_text(raw_event.get("city_name", ""), max_len=16)
+    venue_name = _normalize_event_text(raw_event.get("venue_name", ""), max_len=36)
+
+    location_parts = [city_name]
+    if venue_name and venue_name != city_name:
+        location_parts.append(venue_name)
+    fallback_location = " · ".join(part for part in location_parts if part) or "全国（以活动页为准）"
+
+    event_text = f"{title} {fallback_location}".lower()
+    event_format = "线上" if any(w in event_text for w in ["线上", "直播", "webinar", "online", "腾讯会议", "zoom"]) else "线下"
+    location = _infer_event_location(title, fallback_location, event_format, fallback_location)
+
+    price_text = "详见活动页"
+    try:
+        min_price = float(raw_event.get("min_price") or 0)
+        price_text = "免费" if min_price <= 0 else f"¥{int(min_price)} 起"
+    except Exception:
+        pass
+
+    description = f"来自活动家本土商务会议源，检索关键词：{keyword}，参考票价：{price_text}。"
+    keywords, industries = _detect_event_profile(title, description)
+    high_value = any(marker in f"{title} {description}".lower() for marker in EVENT_MARKERS)
+
+    event_uuid = str(raw_event.get("event_uuid") or "").strip()
+    event_url = f"https://www.huodongjia.com/event-{event_uuid}.html" if event_uuid else ""
+
+    return {
+        "title": title,
+        "time": _format_event_start(begin_time),
+        "location": location,
+        "format": event_format,
+        "source": "local",
+        "source_detail": "活动家（本土商务会议）",
+        "keywords": keywords,
+        "target_industries": industries,
+        "description": description,
+        "registration_deadline": _format_event_start(begin_time) if begin_time else "详见活动页",
+        "value": "高" if high_value else "中",
+        "url": event_url,
+    }
+
+
+def _fetch_huodongjia_events(max_items: int = 18) -> list[dict]:
+    collected: list[dict] = []
+    seen_urls = set()
+    query_keywords = list(dict.fromkeys(LOCAL_EVENT_KEYWORDS + HUODONGJIA_EVENT_KEYWORDS))
+
+    base_headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 BizAdvisor/1.0",
+        "Origin": "https://www.huodongjia.com",
+        "Referer": "https://www.huodongjia.com/business",
+    }
+
+    for keyword in query_keywords:
+        payload = {
+            "page": 1,
+            "page_size": 8,
+            "cat_type": 1,
+            "keyword": keyword,
+        }
+        headers = {**base_headers, **_build_huodongjia_signature(payload)}
+        response = _safe_api_post_json(
+            HUODONGJIA_EVENT_API_URL,
+            payload=payload,
+            headers=headers,
+            timeout=16,
+        )
+        if not response:
+            continue
+        if int(response.get("code", 0) or 0) != 200:
+            continue
+
+        rows = ((response.get("data") or {}).get("data") or [])
+        for raw_event in rows:
+            event = _event_from_huodongjia(raw_event, keyword)
+            if not event:
+                continue
+            event_url = event.get("url", "")
+            if not event_url or event_url in seen_urls:
+                continue
+            if not _is_mainland_event(event):
+                continue
+            seen_urls.add(event_url)
+            collected.append(event)
+            if len(collected) >= max_items:
+                return collected
+
+    return collected
+
+
 def _is_mainland_event(event: dict) -> bool:
     text = f"{event.get('title', '')} {event.get('location', '')}"
     return not any(marker in text for marker in NON_MAINLAND_LOCATION_MARKERS)
@@ -1070,11 +1386,16 @@ def _build_live_events(max_items: int = 12) -> tuple[list[dict], list[str]]:
     warnings: list[str] = []
     all_events: list[dict] = []
 
-    local_events = _fetch_huodongxing_events(max_items=max_items * 2)
-    if local_events:
-        all_events.extend(local_events)
-    else:
-        warnings.append("本土活动源暂不可用")
+    huodongxing_events = _fetch_huodongxing_events(max_items=max_items * 2)
+    huodongjia_events = _fetch_huodongjia_events(max_items=max_items * 2)
+
+    if huodongxing_events:
+        all_events.extend(huodongxing_events)
+    if huodongjia_events:
+        all_events.extend(huodongjia_events)
+
+    if not huodongxing_events and not huodongjia_events:
+        warnings.append("本土活动源暂不可用（活动行/活动家均未返回可用活动）")
 
     eventbrite_token = os.getenv("EVENTBRITE_API_TOKEN", "").strip()
     ticketmaster_key = os.getenv("TICKETMASTER_API_KEY", "").strip()
@@ -1499,6 +1820,34 @@ def inject_styles() -> None:
             color: #0d7d77;
             border-top: 1px dashed rgba(31, 159, 152, 0.3);
             padding-top: 0.35rem;
+        }
+
+        .wf-action a {
+            color: #0a66c2;
+            font-weight: 700;
+            text-decoration: none;
+            margin-right: 0.35rem;
+        }
+
+        .wf-action a:hover {
+            text-decoration: underline;
+        }
+
+        .wf-links {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.36rem;
+        }
+
+        .wf-link {
+            display: inline-flex;
+            align-items: center;
+            padding: 0.16rem 0.55rem;
+            border-radius: 999px;
+            border: 1px solid rgba(10, 102, 194, 0.2);
+            background: #f2f8ff;
+            font-size: 0.8rem;
         }
 
         .model-card {
@@ -2024,7 +2373,131 @@ def render_timeline(actions: list[dict]) -> None:
     st.markdown(block, unsafe_allow_html=True)
 
 
-def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> None:
+def _safe_target_city_name(event: dict) -> str:
+    return str(event.get("event_city") or event.get("location") or "目的地").strip() or "目的地"
+
+
+def _canonical_city_name(city_text: str) -> str:
+    city = str(city_text or "").strip()
+    if not city:
+        return ""
+
+    if city in MAJOR_CITY_COORDS:
+        return city
+    if city in MAJOR_CITY_ALIASES:
+        return MAJOR_CITY_ALIASES[city]
+
+    for alias, canonical in MAJOR_CITY_ALIASES.items():
+        if alias in city:
+            return canonical
+
+    for canonical in MAJOR_CITY_COORDS:
+        if canonical in city:
+            return canonical
+
+    if city.endswith("市") and city[:-1] in MAJOR_CITY_COORDS:
+        return city[:-1]
+    return city
+
+
+def _guess_train_date(event: dict) -> str:
+    raw_time = str(event.get("time", "")).strip()
+    now = datetime.now()
+
+    ymd_match = re.search(r"(20\d{2})[年\-/.](\d{1,2})[月\-/.](\d{1,2})", raw_time)
+    if ymd_match:
+        try:
+            dt = datetime(int(ymd_match.group(1)), int(ymd_match.group(2)), int(ymd_match.group(3)))
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    md_match = re.search(r"(\d{1,2})[月\-/.](\d{1,2})", raw_time)
+    if md_match:
+        month = int(md_match.group(1))
+        day = int(md_match.group(2))
+        try:
+            dt = datetime(now.year, month, day)
+            if dt.date() < now.date():
+                dt = datetime(now.year + 1, month, day)
+            return dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    return now.strftime("%Y-%m-%d")
+
+
+def _build_12306_ticket_url(origin_city: str, target_city: str, event: dict) -> str:
+    from_city = _canonical_city_name(origin_city) or "北京"
+    to_city = _canonical_city_name(target_city) or "上海"
+    from_code = CITY_12306_STATION_CODES.get(from_city, "")
+    to_code = CITY_12306_STATION_CODES.get(to_city, "")
+
+    fs = f"{from_city},{from_code}" if from_code else from_city
+    ts = f"{to_city},{to_code}" if to_code else to_city
+    date_str = _guess_train_date(event)
+
+    return (
+        "https://kyfw.12306.cn/otn/leftTicket/init"
+        f"?linktypeid=dc&fs={quote_plus(fs)}&ts={quote_plus(ts)}&date={quote_plus(date_str)}&flag=N,N,Y"
+    )
+
+
+def _build_travel_entries(event: dict, geo_profile: dict | None = None) -> list[dict]:
+    profile = geo_profile or {}
+    origin_city = str(profile.get("city") or profile.get("nearest_major_city") or "出发地")
+    target_city = _safe_target_city_name(event)
+    distance_km = float(event.get("distance_km", 0) or 0)
+    mode = str(event.get("travel_mode", ""))
+    is_online = str(event.get("format", "")) == "线上" or "线上" in str(event.get("location", ""))
+
+    if is_online:
+        return []
+
+    entries: list[dict] = []
+
+    if "高铁" in mode or "城际" in mode or (30 < distance_km <= 320):
+        entries.append(
+            {
+                "label": "高铁买票",
+                "url": _build_12306_ticket_url(origin_city, target_city, event),
+            }
+        )
+
+    if distance_km <= 60:
+        entries.append(
+            {
+                "label": "打车入口",
+                "url": f"https://uri.amap.com/navigation?mode=car&from={quote_plus(origin_city)}&to={quote_plus(target_city)}&src=BizAdvisor",
+            }
+        )
+    elif distance_km <= 260:
+        entries.append(
+            {
+                "label": "城际打车入口",
+                "url": f"https://uri.amap.com/navigation?mode=car&from={quote_plus(origin_city)}&to={quote_plus(target_city)}&src=BizAdvisor",
+            }
+        )
+    else:
+        entries.append(
+            {
+                "label": "航班比价入口",
+                "url": "https://flights.ctrip.com/",
+            }
+        )
+
+    if distance_km > 0:
+        entries.append(
+            {
+                "label": "公交/地铁入口",
+                "url": f"https://uri.amap.com/navigation?mode=bus&from={quote_plus(origin_city)}&to={quote_plus(target_city)}&src=BizAdvisor",
+            }
+        )
+
+    return entries[:4]
+
+
+def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_geo_profile: dict | None = None) -> None:
     st.markdown("<div class='section-title'>2. 值得做</div>", unsafe_allow_html=True)
 
     has_events = bool(matched_events)
@@ -2043,6 +2516,25 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
             matched_kw = "、".join(event.get("matched_keywords", [])[:3]) or "行业相关"
             travel_note = event.get("travel_note", "")
             travel_line = f"<div class=\"wf-action\">到场成本：{html.escape(travel_note)}</div>" if travel_note else ""
+            event_url = str(event.get("url", "")).strip()
+            deadline_text = str(event.get("registration_deadline", "尽快确认报名")).strip() or "尽快确认报名"
+            if deadline_text == "详见活动页" and event_url:
+                action_line = (
+                    f"<div class=\"wf-action\">建议动作："
+                    f"<a href=\"{html.escape(event_url)}\" target=\"_blank\" rel=\"noopener noreferrer\">详见活动页</a></div>"
+                )
+            else:
+                action_line = f"<div class=\"wf-action\">建议动作：{html.escape(deadline_text)}</div>"
+
+            travel_entries = _build_travel_entries(event, geo_profile=user_geo_profile)
+            travel_entry_html = ""
+            if travel_entries:
+                links = "".join(
+                    f"<a class=\"wf-link\" href=\"{html.escape(item['url'])}\" target=\"_blank\" rel=\"noopener noreferrer\">{html.escape(item['label'])}</a>"
+                    for item in travel_entries
+                )
+                travel_entry_html = f"<div class=\"wf-action wf-links\">出行入口：{links}</div>"
+
             event_cards.append(
                 block_html(
                     f"""
@@ -2051,8 +2543,9 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict]) -> No
                       <div class="wf-title">{html.escape(event.get('title', '商业活动'))}</div>
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
-                      <div class="wf-action">建议动作：{html.escape(event.get('registration_deadline', '尽快确认报名'))}</div>
+                      {action_line}
                       {travel_line}
+                      {travel_entry_html}
                     </article>
                     """
                 )
@@ -2282,7 +2775,7 @@ render_kpi_counter(
 )
 
 render_timeline(actions)
-render_why_cards(matched_events, matched_news)
+render_why_cards(matched_events, matched_news, user_geo_profile=user_geo_profile)
 render_model_explainer(selected_boss, matched_news)
 
 st.markdown("<div class='footer-note'>AI商业参谋 · 高保真UI预览版 ｜ 信息顺序：做什么 → 为什么做 → 模型解释</div>", unsafe_allow_html=True)
