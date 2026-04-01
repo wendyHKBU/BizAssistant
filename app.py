@@ -2418,32 +2418,6 @@ def _is_official_exhibition_event(event: dict) -> bool:
     return source == "official_exhibition" or "会展中心官网排期" in detail or "官网排期入口" in detail
 
 
-def _build_official_exhibition_fallback_event(source: dict[str, str]) -> dict:
-    city = str(source.get("city", "")).strip() or "本地"
-    center_name = str(source.get("center", "会展中心")).strip() or "会展中心"
-    schedule_url = str(source.get("schedule_url") or source.get("site") or "").strip()
-
-    title = f"{city}{center_name}近期展会排期（官方入口）"
-    description = "来源：会展中心官网排期入口。若结构化列表未返回，可先进入官方页查看最新展会日历与报名信息。"
-    keywords, industries = _detect_event_profile(title, description)
-
-    return {
-        "title": _normalize_event_text(title, max_len=96),
-        "time": "近期",
-        "location": f"{city} · {center_name}",
-        "format": "线下",
-        "source": "official_exhibition",
-        "source_detail": f"会展中心官网排期（{center_name}） · 官网排期入口",
-        "keywords": keywords,
-        "target_industries": industries,
-        "description": description,
-        "registration_deadline": "请进入官网排期入口确认",
-        "value": "中",
-        "url": schedule_url,
-        "is_fallback": True,
-    }
-
-
 def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city: str = "") -> tuple[list[dict], list[str]]:
     sources = OFFICIAL_EXHIBITION_CENTER_SOURCES
     if not sources:
