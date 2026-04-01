@@ -14,7 +14,7 @@ import random
 import re
 import time
 import textwrap
-from urllib.parse import quote_plus, urljoin
+from urllib.parse import quote_plus, urljoin, urlparse
 import xml.etree.ElementTree as ET
 
 import requests
@@ -327,12 +327,12 @@ HUODONGJIA_EVENT_KEYWORDS = [
 EVENT_DISCOVERY_PLATFORMS = [
     {"name": "百格活动", "domain": "bagevent.com", "url": "https://www.bagevent.com"},
     {"name": "会腾软件", "domain": "huitengsoft.com", "url": "https://www.huitengsoft.com"},
-    {"name": "互动吧", "domain": "hudongba.com", "url": "https://www.hudongba.com"},
-    {"name": "活动行", "domain": "huodongxing.com", "url": "https://www.huodongxing.com"},
+    {"name": "互动吧", "domain": "hdb.com", "url": "http://www.hdb.com"},
+    {"name": "活动行", "domain": "huodongxing.com", "url": "http://www.huodongxing.com"},
     {"name": "31会议", "domain": "31huiyi.com", "url": "https://www.31huiyi.com"},
     {"name": "快会务", "domain": "kuaihuiwu.com", "url": "https://www.kuaihuiwu.com"},
-    {"name": "会会", "domain": "huihui521.com", "url": "https://www.huihui521.com"},
-    {"name": "活动家", "domain": "huodongjia.com", "url": "https://www.huodongjia.com"},
+    {"name": "会会", "domain": "huihui521.com", "url": "https://www.huihui521.com/"},
+    {"name": "活动家", "domain": "huodongjia.com", "url": "http://www.huodongjia.com"},
 ]
 
 WECHAT_EVENT_CHANNEL_TOPICS = [
@@ -380,6 +380,16 @@ EXHIBITION_CENTER_TITLE_EXCLUDE_MARKERS = [
     "下载",
     "导航",
 ]
+EXHIBITION_NOISE_MARKERS = [
+    "360全景",
+    "全景",
+    "vr展馆",
+    "vr看展",
+    "云逛展",
+    "虚拟展馆",
+    "展馆导览",
+]
+EXHIBITION_PREEXTRACT_TTL_SECONDS = 1800
 
 EVENT_API_QUERIES = [
     "business summit",
@@ -748,6 +758,79 @@ def _normalize_event_text(text: str, max_len: int = 150) -> str:
     if len(clean) <= max_len:
         return clean
     return clean[: max_len - 3].rstrip() + "..."
+
+
+def _event_time_to_mmdd_candidates(raw_time: str) -> set[str]:
+    text = str(raw_time or "")
+    if not text.strip():
+        return set()
+
+    values: set[str] = set()
+    now = datetime.now()
+
+    for match in re.finditer(r"(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})", text):
+        try:
+            dt = datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            values.add(dt.strftime("%m-%d"))
+        except Exception:
+            continue
+
+    for match in re.finditer(r"(\d{1,2})\s*[月\-/.]\s*(\d{1,2})\s*(?:日|号)?", text):
+        month = int(match.group(1))
+        day = int(match.group(2))
+        try:
+            dt = datetime(now.year, month, day)
+        except Exception:
+            continue
+        values.add(dt.strftime("%m-%d"))
+
+    range_match = re.search(r"(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?\s*[~\-至]\s*(\d{1,2})\s*(?:日|号)?", text)
+    if range_match:
+        month = int(range_match.group(1))
+        begin = int(range_match.group(2))
+        end = int(range_match.group(3))
+        if begin <= now.day <= end and now.month == month:
+            values.add(now.strftime("%m-%d"))
+
+    return values
+
+
+def _event_occurs_today(event: dict) -> bool:
+    today = datetime.now().strftime("%m-%d")
+    joined = " ".join(
+        [
+            str(event.get("time", "")),
+            str(event.get("title", "")),
+            str(event.get("description", "")),
+        ]
+    )
+
+    if today in joined:
+        return True
+
+    candidates = _event_time_to_mmdd_candidates(joined)
+    return today in candidates
+
+
+def _contains_exhibition_noise(text: str) -> bool:
+    clean = str(text or "").lower()
+    for marker in EXHIBITION_NOISE_MARKERS:
+        if str(marker).lower() in clean:
+            return True
+    return False
+
+
+def _is_generic_official_schedule_event(event: dict) -> bool:
+    if not _is_official_exhibition_event(event):
+        return False
+
+    title = str(event.get("title", "")).strip()
+    source_detail = str(event.get("source_detail", "")).strip()
+    if event.get("is_fallback"):
+        return True
+    if "官方入口" in title or "官网排期入口" in source_detail:
+        return True
+    return False
 
 
 def _extract_profile_terms(text: str) -> list[str]:
@@ -2272,6 +2355,8 @@ def _extract_official_exhibition_events(
         title = _clean_html_text(match.group("title") or "")
         if not _looks_like_exhibition_event_title(title):
             continue
+        if _contains_exhibition_noise(title):
+            continue
 
         title_key = re.sub(r"\s+", " ", title.lower()).strip()
         if title_key in seen_titles:
@@ -2286,9 +2371,16 @@ def _extract_official_exhibition_events(
         event_time = _extract_exhibition_event_time(title, context_text)
 
         raw_text = f"{title} {context_text}".lower()
+        if _contains_exhibition_noise(raw_text):
+            continue
+
         event_format = "线上" if any(w in raw_text for w in ["线上", "直播", "webinar", "在线"]) else "线下"
         location = "线上" if event_format == "线上" else f"{city} · {center_name}"
-        description = f"来源：{city}{center_name}官网展会排期，建议点击官方链接确认展位与报名信息。"
+        content_brief = _normalize_event_text(context_text, max_len=120) or "请进入官方链接查看活动内容。"
+        description = (
+            f"来源：{city}{center_name}官网展会排期。"
+            f"内容：{content_brief}"
+        )
 
         keywords, industries = _detect_event_profile(title, description)
         high_value = any(marker in f"{title} {context_text}" for marker in EVENT_MARKERS) or any(
@@ -2306,6 +2398,7 @@ def _extract_official_exhibition_events(
                 "source_detail": f"会展中心官网排期（{center_name}）",
                 "keywords": keywords,
                 "target_industries": industries,
+                "content": content_brief,
                 "description": description,
                 "registration_deadline": "详见官网排期页",
                 "value": "高" if high_value else "中",
@@ -2367,7 +2460,6 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
     warnings: list[str] = []
     seen_titles = set()
     seen_urls = set()
-    fallback_count = 0
 
     for source in selected_sources:
         fetch_url = str(source.get("schedule_url") or source.get("site") or "").strip()
@@ -2375,11 +2467,6 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
             continue
 
         per_site_limit = EXHIBITION_CENTER_PER_SITE_LIMIT + (1 if _same_canonical_city(source.get("city", ""), preferred_city_norm) else 0)
-        fallback_allowed = (
-            _same_canonical_city(source.get("city", ""), preferred_city_norm)
-            if preferred_city_norm
-            else len(collected) < 3
-        )
 
         html_text = _safe_get_text(fetch_url, timeout=7)
         candidates: list[dict] = []
@@ -2389,11 +2476,6 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
                 source=source,
                 max_items=per_site_limit,
             )
-
-        if not candidates and fallback_allowed:
-            fallback_event = _build_official_exhibition_fallback_event(source)
-            if fallback_event.get("url"):
-                candidates = [fallback_event]
 
         for event in candidates:
             title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
@@ -2405,6 +2487,10 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
                 continue
             if not _is_mainland_event(event):
                 continue
+            if _is_generic_official_schedule_event(event):
+                continue
+            if _contains_exhibition_noise(f"{event.get('title', '')} {event.get('description', '')}"):
+                continue
 
             if title_key:
                 seen_titles.add(title_key)
@@ -2412,11 +2498,7 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
                 seen_urls.add(event_url)
 
             collected.append(event)
-            if event.get("is_fallback"):
-                fallback_count += 1
             if len(collected) >= max_items:
-                if fallback_count:
-                    warnings.append(f"会展中心官网结构化抓取受限，已补充 {fallback_count} 条官网排期入口直达")
                 if preferred_city_norm:
                     local_cnt = sum(1 for item in collected if _same_canonical_city(_extract_event_city(item), preferred_city_norm))
                     warnings.append(f"已按{preferred_city_norm}优先抓取会展中心官网，补充活动 {len(collected)} 条（本地{local_cnt}条）")
@@ -2425,8 +2507,6 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
                 return collected, warnings
 
     if collected:
-        if fallback_count:
-            warnings.append(f"会展中心官网结构化抓取受限，已补充 {fallback_count} 条官网排期入口直达")
         if preferred_city_norm:
             local_cnt = sum(1 for item in collected if _same_canonical_city(_extract_event_city(item), preferred_city_norm))
             warnings.append(f"已按{preferred_city_norm}优先抓取会展中心官网，补充活动 {len(collected)} 条（本地{local_cnt}条）")
@@ -2441,6 +2521,35 @@ def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city
     return collected, warnings
 
 
+@st.cache_data(show_spinner=False, ttl=EXHIBITION_PREEXTRACT_TTL_SECONDS)
+def _get_preextracted_official_exhibition_events(
+    preferred_city: str,
+    max_items: int,
+    day_key: str,
+) -> tuple[list[dict], list[str]]:
+    del day_key  # 使用日期键触发每日重建，避免跨日沿用旧活动
+
+    events, warnings = _fetch_official_exhibition_center_events(
+        max_items=max_items,
+        preferred_city=preferred_city,
+    )
+
+    prepared: list[dict] = []
+    for event in events:
+        event_copy = {**event}
+        event_copy["content"] = _normalize_event_text(str(event_copy.get("content") or event_copy.get("description", "")), max_len=120)
+        prepared.append(event_copy)
+
+    prepared.sort(
+        key=lambda item: (
+            0 if _event_occurs_today(item) else 1,
+            str(item.get("time", "")),
+            str(item.get("title", "")),
+        )
+    )
+    return prepared, warnings
+
+
 def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
     entries: list[dict] = []
     query_keywords = list(dict.fromkeys(HUODONGJIA_EVENT_KEYWORDS + ["会展", "路演", "沙龙"]))
@@ -2448,6 +2557,7 @@ def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
     for platform in EVENT_DISCOVERY_PLATFORMS:
         for keyword in query_keywords[:2]:
             title = f"{platform['name']}商机入口：{keyword}"
+            search_url = _build_baidu_site_search_url(platform["domain"], keyword, city_hint="")
             description = (
                 f"来自{platform['name']}平台检索入口，可按关键词快速发现商业活动。"
                 f"来源域名：{platform['domain']}。"
@@ -2466,7 +2576,8 @@ def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
                     "description": description,
                     "registration_deadline": "详见平台页",
                     "value": "中",
-                    "url": _build_baidu_site_search_url(platform["domain"], keyword, city_hint=""),
+                    "url": str(platform.get("url", "")).strip() or search_url,
+                    "search_url": search_url,
                 }
             )
             if len(entries) >= max_items:
@@ -2619,9 +2730,11 @@ def _build_live_events(max_items: int = 12, preferred_city: str = "") -> tuple[l
         max_items=max(max_items, 8),
         preferred_city=preferred_city_norm,
     )
-    official_exhibition_events, official_warnings = _fetch_official_exhibition_center_events(
-        max_items=max(max_items * 2, 24),
+    preextract_day_key = datetime.now().strftime("%Y%m%d")
+    official_exhibition_events, official_warnings = _get_preextracted_official_exhibition_events(
         preferred_city=preferred_city_norm,
+        max_items=max(max_items * 2, 24),
+        day_key=preextract_day_key,
     )
 
     mixed_events = _interleave_event_sources(
@@ -2636,6 +2749,8 @@ def _build_live_events(max_items: int = 12, preferred_city: str = "") -> tuple[l
 
     if official_warnings:
         warnings.extend(official_warnings)
+    elif official_exhibition_events:
+        warnings.append("会展活动已启用预提取缓存（按展会名称/时间/内容供前端直接读取）")
 
     if wechat_warnings:
         warnings.extend(wechat_warnings)
@@ -3517,6 +3632,65 @@ def _semantic_overlap_score(profile_terms: list[str], text: str) -> int:
     return min(24, int(overlap * 2 + jaccard * 40))
 
 
+def _event_semantic_expert_review(
+    boss: dict,
+    event: dict,
+    text: str,
+    keyword_hits: list[str],
+    event_prefs: set[str],
+    event_industries: list[str],
+) -> dict:
+    profile_terms = _build_boss_profile_terms(boss)
+
+    nlp_hits = _match_profile_terms(text, profile_terms, limit=8)
+    nlp_signals = list(dict.fromkeys(keyword_hits + nlp_hits))
+    nlp_score = min(22, len(nlp_signals) * 4)
+    nlp_pass = bool(keyword_hits or len(nlp_hits) >= 2)
+
+    bert_raw = _semantic_overlap_score(profile_terms, text)
+    bert_score = min(22, bert_raw)
+    bert_pass = bert_raw >= 8
+
+    industry_fit = 0
+    for pref in event_prefs:
+        if any(pref in ind or ind in pref for ind in event_industries):
+            industry_fit += 1
+
+    llm_score = 0
+    if industry_fit:
+        llm_score += min(14, industry_fit * 7)
+    if keyword_hits:
+        llm_score += min(8, len(keyword_hits) * 3)
+    if _is_official_exhibition_event(event) and _event_occurs_today(event):
+        llm_score += 5
+    if _contains_exhibition_noise(text):
+        llm_score -= 30
+    if not event_industries and not keyword_hits and bert_raw < 6:
+        llm_score -= 8
+
+    llm_pass = llm_score >= 8
+    vote_count = int(nlp_pass) + int(bert_pass) + int(llm_pass)
+
+    combined = int(round(nlp_score * 0.34 + bert_score * 0.34 + llm_score * 0.32))
+    combined = max(-20, min(24, combined))
+
+    blocked = False
+    if _contains_exhibition_noise(f"{event.get('title', '')} {event.get('description', '')}"):
+        blocked = True
+    elif vote_count == 0 and str(event.get("source", "")).strip().lower() != "portal":
+        blocked = True
+
+    return {
+        "nlp_score": nlp_score,
+        "bert_score": bert_score,
+        "llm_score": llm_score,
+        "vote_count": vote_count,
+        "combined": combined,
+        "blocked": blocked,
+        "top_terms": nlp_signals[:3],
+    }
+
+
 def _news_relevance_score(boss: dict, item: dict) -> tuple[int, list[str]]:
     ignore_keywords = [kw.lower() for kw in boss.get("ignore_keywords", [])]
     boss_keywords = [kw.lower() for kw in boss.get("keywords", [])]
@@ -3595,10 +3769,23 @@ def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
 
     if any(ig and ig in text for ig in ignore_keywords):
         return -1, []
+    if _contains_exhibition_noise(text):
+        return -1, []
 
     keyword_hits = _match_profile_terms(text, boss_keywords, limit=4)
     term_hits = _match_profile_terms(text, profile_terms, limit=6)
     extra_term_hits = [term for term in term_hits if term not in keyword_hits]
+
+    semantic_review = _event_semantic_expert_review(
+        boss,
+        event,
+        text,
+        keyword_hits=keyword_hits,
+        event_prefs=event_prefs,
+        event_industries=event_industries,
+    )
+    if semantic_review.get("blocked"):
+        return -1, []
 
     industry_hits = 0
     for pref in event_prefs:
@@ -3609,9 +3796,12 @@ def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
     score += min(36, industry_hits * 24)
     score += len(keyword_hits) * 18
     score += len(extra_term_hits) * 8
+    score += int(semantic_review.get("combined", 0) or 0)
     if is_official_exhibition:
         # 官方会展排期通常描述偏简短，给一个温和基线，避免被过早过滤。
         score += 12
+    if int(semantic_review.get("vote_count", 0) or 0) < 2:
+        score -= 10
 
     location_text = f"{event.get('title', '')} {event.get('location', '')}"
     if city and city in location_text:
@@ -3644,6 +3834,8 @@ def _event_relevance_score(boss: dict, event: dict) -> tuple[int, list[str]]:
 
     score = max(0, min(98, score))
     matched = list(dict.fromkeys(keyword_hits + extra_term_hits))[:3]
+    if not matched and semantic_review.get("top_terms"):
+        matched = list(semantic_review.get("top_terms") or [])[:3]
     if not matched and is_official_exhibition:
         city_hint = _extract_event_city(event)
         matched = [term for term in [city_hint, "会展资源"] if term][:2]
@@ -4168,14 +4360,83 @@ def _minimum_industry_consistent_events(boss: dict, events: list[dict], top_n: i
     return [item[4] for item in scored[:top_n]]
 
 
+def _is_local_today_exhibition_match(boss: dict, event: dict, preferred_city: str = "") -> bool:
+    if not _is_official_exhibition_event(event):
+        return False
+    if _is_generic_official_schedule_event(event):
+        return False
+    if _contains_exhibition_noise(f"{event.get('title', '')} {event.get('description', '')}"):
+        return False
+    if not _event_occurs_today(event):
+        return False
+
+    target_city = _canonical_city_name(preferred_city) or _canonical_city_name(str(boss.get("city", "")))
+    if target_city:
+        event_city = _canonical_city_name(_extract_event_city(event))
+        if event_city and not _same_canonical_city(event_city, target_city):
+            return False
+
+    relevance_score, _ = _event_relevance_score(boss, event)
+    return relevance_score >= 36
+
+
+def _has_local_today_exhibition_event(boss: dict, events: list[dict], preferred_city: str = "") -> bool:
+    return any(_is_local_today_exhibition_match(boss, event, preferred_city=preferred_city) for event in (events or []))
+
+
+def _build_local_platform_fallback_events(boss: dict, preferred_city: str = "", top_n: int = 2) -> list[dict]:
+    city = _canonical_city_name(preferred_city) or _canonical_city_name(str(boss.get("city", ""))) or "本地"
+    industry = _normalize_event_text(str(boss.get("industry", "行业")), max_len=24) or "行业"
+    keywords = [str(kw).strip() for kw in boss.get("keywords", []) if str(kw).strip()][:2]
+    primary_kw = keywords[0] if keywords else industry
+
+    picked: list[dict] = []
+    for platform in EVENT_DISCOVERY_PLATFORMS:
+        title = f"{city}{industry}活动入口：{platform['name']}"
+        description = (
+            f"本地会展中心今日暂无可直接匹配活动时，推荐使用{platform['name']}继续按“展会名称/时间/内容”筛选。"
+            f"建议检索关键词：{primary_kw}。"
+        )
+        event_keywords, event_industries = _detect_event_profile(title + " " + primary_kw, description)
+        picked.append(
+            {
+                "title": title,
+                "time": "今天",
+                "location": f"{city}（平台入口）",
+                "format": "线上",
+                "source": "portal",
+                "source_detail": f"{platform['name']}（本土活动信息获取平台）",
+                "keywords": event_keywords,
+                "target_industries": event_industries,
+                "description": description,
+                "registration_deadline": "详见平台当日活动页",
+                "value": "中",
+                "url": str(platform.get("url", "")).strip() or _build_baidu_site_search_url(platform["domain"], primary_kw, city_hint=city),
+            }
+        )
+        if len(picked) >= top_n:
+            break
+
+    return picked[:top_n]
+
+
 def _ensure_exhibition_event_visibility(
     boss: dict,
     matched_events: list[dict],
     candidate_events: list[dict],
+    preferred_city: str = "",
     max_items: int = 3,
 ) -> tuple[list[dict], bool]:
-    current = [{**item} for item in (matched_events or [])]
-    if any(_is_official_exhibition_event(event) for event in current):
+    current = [{**item} for item in (matched_events or []) if not _is_generic_official_schedule_event(item)]
+    if _has_local_today_exhibition_event(boss, current, preferred_city=preferred_city):
+        current.sort(
+            key=lambda item: (
+                1 if _is_local_today_exhibition_match(boss, item, preferred_city=preferred_city) else 0,
+                int(item.get("score", 0) or 0),
+                _event_rank_key(item),
+            ),
+            reverse=True,
+        )
         return current[:max_items], False
 
     seen_titles = {
@@ -4186,7 +4447,9 @@ def _ensure_exhibition_event_visibility(
 
     official_candidates: list[tuple[int, int, tuple[int, int, int], dict]] = []
     for event in candidate_events or []:
-        if not _is_official_exhibition_event(event):
+        if not _is_local_today_exhibition_match(boss, event, preferred_city=preferred_city):
+            continue
+        if _is_generic_official_schedule_event(event):
             continue
 
         title_key = re.sub(r"\s+", " ", str(event.get("title", "")).lower()).strip()
@@ -4204,9 +4467,9 @@ def _ensure_exhibition_event_visibility(
             "score": min(94, max(int(event.get("score", 0) or 0), int(relevance_score), base_floor)),
             "matched_keywords": event.get("matched_keywords") or (matched[:3] if matched else ["会展资源"]),
         }
-        detail = str(event_copy.get("source_detail", "会展中心官网排期")).strip()
-        if "官方入口" not in detail:
-            event_copy["source_detail"] = f"{detail} · 官方入口"
+        detail = str(event_copy.get("source_detail", "会展中心官网排期")).strip() or "会展中心官网排期"
+        if "今日同城行业匹配" not in detail:
+            event_copy["source_detail"] = f"{detail} · 今日同城行业匹配"
 
         official_candidates.append((tier, int(event_copy["score"]), _event_rank_key(event_copy), event_copy))
 
@@ -5096,18 +5359,85 @@ def _event_detail_url(event: dict) -> str:
     return f"https://www.baidu.com/s?wd={quote_plus(query)}"
 
 
+def _extract_host(raw_url: str) -> str:
+    url = _normalize_url_with_base(raw_url)
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").strip().lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _resolve_source_home_url(source_name: str) -> str:
+    clean_name = str(source_name or "").strip()
+    if not clean_name:
+        return ""
+
+    direct = SOURCE_HOME_URL_MAP.get(clean_name)
+    if direct:
+        return direct
+
+    for key, value in SOURCE_HOME_URL_MAP.items():
+        if key in clean_name or clean_name in key:
+            return value
+    return ""
+
+
+def _build_policy_title_search_url(title: str, source_name: str, raw_link: str) -> str:
+    clean_title = _normalize_event_text(title, max_len=72) or "政策原文"
+    source_home = _resolve_source_home_url(source_name)
+    host = _extract_host(source_home) or _extract_host(raw_link)
+    if host:
+        query = f"site:{host} {clean_title} 政策 原文"
+        return f"https://www.baidu.com/s?wd={quote_plus(query)}"
+    return f"https://www.baidu.com/s?wd={quote_plus(clean_title + ' 政策 原文')}"
+
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _resolve_policy_detail_url(title: str, source_name: str, raw_link: str) -> str:
+    normalized = _normalize_url_with_base(raw_link)
+    if normalized and _looks_like_policy_detail_url(normalized):
+        if _verify_policy_link_title(title, normalized):
+            return normalized
+
+    source_home = _resolve_source_home_url(source_name)
+    if source_home:
+        portal_items = _extract_policy_items_from_portal(source_name, source_home, max_items=8)
+        for item in portal_items:
+            item_title = str(item.get("title", "")).strip()
+            item_link = _normalize_url_with_base(str(item.get("link", "")).strip())
+            if not item_title or not item_link:
+                continue
+            if not _looks_like_policy_detail_url(item_link):
+                continue
+            if _is_policy_title_consistent(title, item_title):
+                return item_link
+
+    if normalized and _looks_like_policy_detail_url(normalized):
+        return normalized
+
+    return _build_policy_title_search_url(title, source_name, raw_link)
+
+
 def _news_detail_url(news: dict) -> str:
     category = _normalize_event_text(str(news.get("category", "政策")), max_len=16)
+    title = str(news.get("title", "")).strip()
+    source_name = str(news.get("source", "")).strip()
     raw_link = str(news.get("link") or news.get("url") or "").strip()
+
+    if category == "政策":
+        return _resolve_policy_detail_url(title=title, source_name=source_name, raw_link=raw_link)
+
     if raw_link:
         normalized = _normalize_url_with_base(raw_link)
         if normalized:
-            if category != "政策" or _looks_like_policy_detail_url(normalized):
-                return normalized
+            return normalized
 
-    source_name = str(news.get("source", "")).strip()
-    if source_name and source_name in SOURCE_HOME_URL_MAP:
-        return SOURCE_HOME_URL_MAP[source_name]
+    source_home = _resolve_source_home_url(source_name)
+    if source_home:
+        return source_home
 
     if category == "政策":
         return "https://www.gov.cn/zhengce/"
@@ -5816,15 +6146,41 @@ if not reuse_recommendation:
             matched_news = guaranteed_news
             live_warnings.append("已启用最小展示保障：固定展示2条行业相关热点")
 
+    matched_events = [
+        event
+        for event in matched_events
+        if (not _is_official_exhibition_event(event))
+        or _is_local_today_exhibition_match(selected_boss, event, preferred_city=preferred_fetch_city)
+    ]
+    matched_events = [event for event in matched_events if not _is_generic_official_schedule_event(event)]
     exhibition_candidates = list(industry_event_pool or []) + list(live_events or [])
     matched_events, exhibition_injected = _ensure_exhibition_event_visibility(
         selected_boss,
         matched_events,
         exhibition_candidates,
+        preferred_city=preferred_fetch_city,
         max_items=3,
     )
     if exhibition_injected:
-        live_warnings.append("已补充1条会展中心官网活动，便于直接核验官方排期")
+        live_warnings.append("已优先补充1条你所在城市会展中心“今天+行业匹配”活动")
+
+    has_local_today_exhibition = _has_local_today_exhibition_event(
+        selected_boss,
+        matched_events,
+        preferred_city=preferred_fetch_city,
+    )
+    if not has_local_today_exhibition:
+        platform_fallback = _build_local_platform_fallback_events(
+            selected_boss,
+            preferred_city=preferred_fetch_city,
+            top_n=1,
+        )
+        if platform_fallback:
+            if len(matched_events) < 3:
+                matched_events.extend(platform_fallback[: 3 - len(matched_events)])
+            else:
+                matched_events[-1] = platform_fallback[0]
+            live_warnings.append("本地会展中心今日暂无名称/时间匹配活动，已切换到本土活动信息平台入口")
 
     matched_news = _attach_news_actions(matched_news, seed=refresh_bucket + int(st.session_state.get("smart_goal_seed", 0)))
     st.session_state["recommendation_cache"] = {
