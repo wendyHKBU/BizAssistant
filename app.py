@@ -5323,14 +5323,39 @@ def _build_travel_entries(event: dict, geo_profile: dict | None = None) -> list[
 
 
 def _event_detail_url(event: dict) -> str:
-    event_url = str(event.get("url", "")).strip()
-    if event_url:
-        return event_url
+    event_url = _normalize_url_with_base(str(event.get("url", "")).strip())
+    if not event_url:
+        return ""
 
-    title = _normalize_event_text(str(event.get("title", "活动详情")), max_len=72)
-    location = _normalize_event_text(str(event.get("location", "")), max_len=32)
-    query = " ".join(part for part in [title, location, "活动", "报名"] if part)
-    return f"https://www.baidu.com/s?wd={quote_plus(query)}"
+    if _is_search_result_url(event_url):
+        return ""
+
+    lower = event_url.lower()
+    if _contains_exhibition_noise(f"{event.get('title', '')} {event.get('description', '')} {lower}"):
+        return ""
+
+    if _is_official_exhibition_event(event):
+        if _is_generic_official_schedule_event(event):
+            return ""
+
+        has_detail_hint = bool(re.search(r"(?:content|detail|article|show|view|event)[_\-/]?\d{2,}", lower)) or bool(
+            re.search(r"[?&](?:id|eventid|articleid|contentid)=\d+", lower)
+        )
+        schedule_markers = [
+            "exhibitionlist",
+            "/about/exhibition",
+            "/schedule",
+            "/calendar",
+            "/list",
+            "/index",
+            "/column",
+            "/channel",
+            "/node",
+        ]
+        if any(marker in lower for marker in schedule_markers) and not has_detail_hint:
+            return ""
+
+    return event_url
 
 
 def _extract_host(raw_url: str) -> str:
@@ -5342,6 +5367,60 @@ def _extract_host(raw_url: str) -> str:
     if host.startswith("www."):
         host = host[4:]
     return host
+
+
+def _is_search_result_url(raw_url: str) -> bool:
+    normalized = _normalize_url_with_base(raw_url)
+    if not normalized:
+        return False
+
+    lower = normalized.lower()
+    parsed = urlparse(lower)
+    host = parsed.netloc
+    path = parsed.path
+    query = parsed.query
+
+    query_hint = any(token in query for token in ["wd=", "q=", "query=", "word=", "keyword="])
+    if not query_hint:
+        return False
+
+    search_hosts = ["baidu.com", "sogou.com", "so.com", "bing.com", "google."]
+    if any(marker in host for marker in search_hosts):
+        return True
+
+    return any(marker in path for marker in ["/s", "/search", "/web/search"])
+
+
+def _is_policy_directory_url(raw_url: str) -> bool:
+    normalized = _normalize_url_with_base(raw_url)
+    if not normalized:
+        return False
+
+    lower = normalized.lower()
+    parsed = urlparse(lower)
+    path = parsed.path or "/"
+
+    if path in {"/", "/zhengce", "/zhengce/", "/policy", "/policy/"}:
+        return True
+
+    has_id_hint = bool(re.search(r"(?:content|article|detail|doc|show|view)[_\-/]?\d{3,}", lower))
+    has_query_id = bool(re.search(r"[?&](?:id|docid|articleid|contentid)=\d+", lower))
+    has_date_path = bool(re.search(r"/(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}", lower))
+    if any(marker in path for marker in POLICY_DETAIL_URL_BLOCK_MARKERS) and not (has_id_hint or has_query_id or has_date_path):
+        return True
+
+    return False
+
+
+def _is_safe_policy_detail_url(raw_url: str) -> bool:
+    normalized = _normalize_url_with_base(raw_url)
+    if not normalized:
+        return False
+    if _is_search_result_url(normalized):
+        return False
+    if _is_policy_directory_url(normalized):
+        return False
+    return _looks_like_policy_detail_url(normalized)
 
 
 def _resolve_source_home_url(source_name: str) -> str:
@@ -5359,20 +5438,10 @@ def _resolve_source_home_url(source_name: str) -> str:
     return ""
 
 
-def _build_policy_title_search_url(title: str, source_name: str, raw_link: str) -> str:
-    clean_title = _normalize_event_text(title, max_len=72) or "政策原文"
-    source_home = _resolve_source_home_url(source_name)
-    host = _extract_host(source_home) or _extract_host(raw_link)
-    if host:
-        query = f"site:{host} {clean_title} 政策 原文"
-        return f"https://www.baidu.com/s?wd={quote_plus(query)}"
-    return f"https://www.baidu.com/s?wd={quote_plus(clean_title + ' 政策 原文')}"
-
-
 @st.cache_data(show_spinner=False, ttl=3600)
 def _resolve_policy_detail_url(title: str, source_name: str, raw_link: str) -> str:
     normalized = _normalize_url_with_base(raw_link)
-    if normalized and _looks_like_policy_detail_url(normalized):
+    if normalized and _is_safe_policy_detail_url(normalized):
         if _verify_policy_link_title(title, normalized):
             return normalized
 
@@ -5384,15 +5453,12 @@ def _resolve_policy_detail_url(title: str, source_name: str, raw_link: str) -> s
             item_link = _normalize_url_with_base(str(item.get("link", "")).strip())
             if not item_title or not item_link:
                 continue
-            if not _looks_like_policy_detail_url(item_link):
+            if not _is_safe_policy_detail_url(item_link):
                 continue
             if _is_policy_title_consistent(title, item_title):
                 return item_link
 
-    if normalized and _looks_like_policy_detail_url(normalized):
-        return normalized
-
-    return _build_policy_title_search_url(title, source_name, raw_link)
+    return ""
 
 
 def _news_detail_url(news: dict) -> str:
@@ -5413,8 +5479,6 @@ def _news_detail_url(news: dict) -> str:
     if source_home:
         return source_home
 
-    if category == "政策":
-        return "https://www.gov.cn/zhengce/"
     if category == "AI科技":
         return "https://www.36kr.com/"
     if category == "金融":
@@ -5616,6 +5680,9 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
             source_detail = str(event.get("source_detail", "")).strip()
             source_line = f"<div class=\"wf-action\">来源：{html.escape(source_detail)}</div>" if source_detail else ""
             event_url = _event_detail_url(event)
+            event_link_html = "<span class=\"wf-detail-link\">详情待校验</span>"
+            if event_url:
+                event_link_html = f"<a class=\"wf-detail-link\" href=\"{html.escape(event_url)}\" target=\"_blank\" rel=\"noopener noreferrer\">详见活动页</a>"
             deadline_text = str(event.get("registration_deadline", "尽快确认报名")).strip() or "尽快确认报名"
             deadline_line = ""
             if deadline_text and deadline_text != "详见活动页":
@@ -5635,7 +5702,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                     f"""
                     <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
                                             <div class="wf-tag tag-event">什么值得做</div>
-                                            <div class="wf-title">{html.escape(event.get('title', '商业活动'))}<a class="wf-detail-link" href="{html.escape(event_url)}" target="_blank" rel="noopener noreferrer">详见活动页</a></div>
+                                            <div class="wf-title">{html.escape(event.get('title', '商业活动'))}{event_link_html}</div>
                       <div class="wf-meta">{html.escape(event.get('time', '今日'))} ｜ {html.escape(event.get('format', '线上'))} ｜ {html.escape(event.get('location', '待确认'))}</div>
                       <div class="wf-reason">匹配理由：与你的「{html.escape(matched_kw)}」方向高度一致，且活动价值级别为 {html.escape(event.get('value', '中'))}。</div>
                                             {source_line}
@@ -5662,6 +5729,9 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
             matched_kw = "、".join(news.get("matched", [])[:2]) or news.get("category", "资讯")
             action = str(news.get("action_text") or get_action(news.get("category", "政策")))
             news_url = _news_detail_url(news)
+            news_link_html = "<span class=\"wf-detail-link\">详情待校验</span>"
+            if news_url:
+                news_link_html = f"<a class=\"wf-detail-link\" href=\"{html.escape(news_url)}\" target=\"_blank\" rel=\"noopener noreferrer\">政策详情页</a>"
             tool_items = _build_action_tool_items(action, news)
             tool_line = "".join(
                 f'<details class="wf-ai-chip"><summary>{html.escape(item["label"])}</summary><div class="wf-ai-content">{_to_html_multiline(item["content"])}</div></details>'
@@ -5672,7 +5742,7 @@ def render_why_cards(matched_events: list[dict], matched_news: list[dict], user_
                     f"""
                     <article class="wf-card" style="--d:{0.08 * idx:.2f}s;">
                       <div class="wf-tag tag-news">热点商机</div>
-                      <div class="wf-title">{html.escape(news.get('title', '行业热点'))}<a class="wf-detail-link" href="{html.escape(news_url)}" target="_blank" rel="noopener noreferrer">政策详情页</a></div>
+                                            <div class="wf-title">{html.escape(news.get('title', '行业热点'))}{news_link_html}</div>
                       <div class="wf-meta">相关度 {score} 分 ｜ 类别：{html.escape(news.get('category', '资讯'))} ｜ 关键词：{html.escape(matched_kw)}</div>
                       <div class="wf-reason">机会解释：该热点与当前业务路径有直接连接，具备短期转化可能。</div>
                       <div class="wf-action">{html.escape(action)}</div>
