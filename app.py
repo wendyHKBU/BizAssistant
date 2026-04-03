@@ -1445,8 +1445,6 @@ def _build_authoritative_policy_portal_news(max_items: int = 20) -> list[dict]:
 
 
 def _build_city_policy_news(preferred_city: str, max_items: int = 6) -> list[dict]:
-    # 已禁用：爬政府网站（慢）
-    return []
     city = _canonical_city_name(preferred_city)
     if not city:
         return []
@@ -1581,8 +1579,6 @@ def _parse_sina_policy_items(max_items: int = 10) -> list[dict]:
 
 
 def _build_policy_only_news(max_items: int = 8) -> list[dict]:
-    # 已禁用：RSS政策请求（改用内置数据）
-    return []
     seen_titles = set()
     news: list[dict] = []
 
@@ -1655,8 +1651,6 @@ def _build_policy_only_news(max_items: int = 8) -> list[dict]:
 
 
 def _build_local_news(max_items: int = 24) -> list[dict]:
-    # 已禁用：RSS请求（改用内置数据）
-    return []
     seen_titles = set()
     news: list[dict] = []
 
@@ -1987,8 +1981,6 @@ def _event_from_huodongjia(raw_event: dict, keyword: str) -> dict | None:
 
 
 def _fetch_huodongjia_events(max_items: int = 18) -> list[dict]:
-    # 已禁用：爬活动家（慢）
-    return []
     collected: list[dict] = []
     seen_urls = set()
     query_keywords = list(dict.fromkeys(LOCAL_EVENT_KEYWORDS + HUODONGJIA_EVENT_KEYWORDS))
@@ -2602,8 +2594,6 @@ def _fetch_wechat_channel_events(max_items: int = 4) -> list[dict]:
 
 
 def _fetch_huodongxing_events(max_items: int = 18) -> list[dict]:
-    # 已禁用：爬活动行（慢）
-    return []
     collected: list[dict] = []
     seen_urls = set()
 
