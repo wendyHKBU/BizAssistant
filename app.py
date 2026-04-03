@@ -325,7 +325,6 @@ HUODONGJIA_EVENT_KEYWORDS = [
 ]
 
 EVENT_DISCOVERY_PLATFORMS = [
-    {"name": "互动吧", "domain": "hdb.com", "url": "http://www.hdb.com"},
     {"name": "活动行", "domain": "huodongxing.com", "url": "http://www.huodongxing.com"},
     {"name": "31会议", "domain": "31huiyi.com", "url": "https://www.31huiyi.com"},
     {"name": "快会务", "domain": "kuaihuiwu.com", "url": "https://www.kuaihuiwu.com"},
