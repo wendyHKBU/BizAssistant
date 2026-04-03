@@ -325,7 +325,6 @@ HUODONGJIA_EVENT_KEYWORDS = [
 ]
 
 EVENT_DISCOVERY_PLATFORMS = [
-    {"name": "百格活动", "domain": "bagevent.com", "url": "https://www.bagevent.com"},
     {"name": "会腾软件", "domain": "huitengsoft.com", "url": "https://www.huitengsoft.com"},
     {"name": "互动吧", "domain": "hdb.com", "url": "http://www.hdb.com"},
     {"name": "活动行", "domain": "huodongxing.com", "url": "http://www.huodongxing.com"},
@@ -580,7 +579,7 @@ def _strip_html_tags(text: str) -> str:
 
 def _parse_rss_items(url: str, max_items: int = 18) -> list[dict]:
     try:
-        response = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0 BizAdvisor/1.0"})
+        response = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0 BizAdvisor/1.0"})
         response.raise_for_status()
         root = ET.fromstring(response.content)
     except Exception:
@@ -609,7 +608,7 @@ def _parse_rss_items(url: str, max_items: int = 18) -> list[dict]:
     return items
 
 
-def _safe_get_text(url: str, timeout: int = 14) -> str:
+def _safe_get_text(url: str, timeout: int = 5) -> str:
     try:
         response = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0 BizAdvisor/1.0"})
         response.raise_for_status()
@@ -863,7 +862,7 @@ def _safe_api_get_json(url: str, *, params: dict | None = None, headers: dict | 
             url,
             params=params,
             headers=headers,
-            timeout=14,
+            timeout=5,
             allow_redirects=True,
         )
         response.raise_for_status()
@@ -1112,7 +1111,7 @@ def apply_ip_proximity_filter(
     if not events:
         return [], {"enabled": False}, warnings
 
-    client_ip = _extract_client_ip()
+    client_ip = ""  # 已禁用IP定位（节省1-3秒）
     geo = _lookup_ip_geo(client_ip) if client_ip else {"ok": False}
     preferred_city_norm = _canonical_city_name(preferred_city)
 
@@ -1404,6 +1403,8 @@ def _extract_policy_items_from_portal(portal_name: str, portal_url: str, max_ite
 
 
 def _build_authoritative_policy_portal_news(max_items: int = 20) -> list[dict]:
+    # 已禁用实时爬取政府门户（节省20-35秒），改用RSS和内置数据
+    return []
     portals = AUTHORITATIVE_POLICY_SOURCE_PORTALS
     if not portals:
         return []
@@ -2419,6 +2420,8 @@ def _is_official_exhibition_event(event: dict) -> bool:
 
 
 def _fetch_official_exhibition_center_events(max_items: int = 24, preferred_city: str = "") -> tuple[list[dict], list[str]]:
+    # 已禁用实时爬取会展中心官网（节省8-15秒）
+    return [], []
     sources = OFFICIAL_EXHIBITION_CENTER_SOURCES
     if not sources:
         return [], ["会展中心官网源为空"]
@@ -2767,7 +2770,7 @@ def _build_live_events(max_items: int = 12, preferred_city: str = "") -> tuple[l
     return live_events, warnings
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=1800)
 def get_realtime_feeds(refresh_bucket: int, preferred_city: str = "") -> tuple[list[dict], list[dict], str, list[str]]:
     del refresh_bucket  # 作为缓存分桶键使用
     preferred_city = _canonical_city_name(preferred_city)
@@ -5468,12 +5471,21 @@ def _news_detail_url(news: dict) -> str:
     raw_link = str(news.get("link") or news.get("url") or "").strip()
 
     if category == "政策":
+        if raw_link:
+            normalized = _normalize_url_with_base(raw_link)
+            if normalized and _is_safe_policy_detail_url(normalized):
+                return normalized
+        if title:
+            return f"https://www.baidu.com/s?wd={quote_plus(title + ' 政策原文')}"
         return _resolve_policy_detail_url(title=title, source_name=source_name, raw_link=raw_link)
 
     if raw_link:
         normalized = _normalize_url_with_base(raw_link)
         if normalized:
             return normalized
+
+    if title:
+        return f"https://www.baidu.com/s?wd={quote_plus(title)}"
 
     source_home = _resolve_source_home_url(source_name)
     if source_home:
@@ -5483,7 +5495,7 @@ def _news_detail_url(news: dict) -> str:
         return "https://www.36kr.com/"
     if category == "金融":
         return "https://finance.sina.com.cn/"
-    return "https://www.xinhuanet.com/"
+    return "https://www.baidu.com/s?wd=商业资讯"
 
 
 def _to_html_multiline(text: str) -> str:
@@ -5932,7 +5944,7 @@ stable_context_key = preferred_fetch_city or "__auto__"
 stable_context_map_ref = dict(st.session_state.get("stable_live_context_by_city") or {})
 has_stable_context = bool(stable_context_map_ref.get(stable_context_key))
 can_reuse_live_context = bool(
-    refresh_goal and not refresh and not retry_load and cached_bucket == refresh_bucket and cached_pref_city == preferred_fetch_city
+    refresh_goal and not refresh and not retry_load and cached_bucket == refresh_bucket
 )
 
 if can_reuse_live_context:
@@ -6254,6 +6266,7 @@ render_kpi_counter(
 )
 
 render_timeline(actions)
+st.markdown("<div style='height:0.5rem'></div>", unsafe_allow_html=True)
 render_why_cards(matched_events, matched_news, user_geo_profile=user_geo_profile)
 model_seed = int(st.session_state.get("smart_goal_seed", 0)) if (refresh_goal and not refresh) else 0
 render_model_explainer(selected_boss, matched_news, seed=model_seed)
