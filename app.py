@@ -2551,7 +2551,7 @@ def _fetch_platform_portal_events(max_items: int = 10) -> list[dict]:
                     "description": description,
                     "registration_deadline": "详见平台页",
                     "value": "中",
-                    "url": str(platform.get("url", "")).strip() or search_url,
+                    "url": search_url,
                     "search_url": search_url,
                 }
             )
@@ -4386,7 +4386,7 @@ def _build_local_platform_fallback_events(boss: dict, preferred_city: str = "", 
                 "description": description,
                 "registration_deadline": "详见平台当日活动页",
                 "value": "中",
-                "url": str(platform.get("url", "")).strip() or _build_baidu_site_search_url(platform["domain"], primary_kw, city_hint=city),
+                "url": _build_baidu_site_search_url(platform["domain"], primary_kw, city_hint=city),
             }
         )
         if len(picked) >= top_n:
